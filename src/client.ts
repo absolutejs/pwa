@@ -110,13 +110,22 @@ const notifyInstallable = (installable: boolean) => {
   installListeners.forEach((listener) => listener(installable));
 };
 
+export type InstallPromptOptions = {
+  /** Suppress the browser's own install UI (mobile mini-infobar) by deferring
+   *  the event. NOTE: Chrome logs a "Banner not shown" notice on every load when
+   *  this is set, and modern Chrome no longer shows the mini-infobar anyway —
+   *  so it defaults to false. The stashed event stays promptable either way. */
+  suppressBrowserPrompt?: boolean;
+};
+
 /** Start listening for the browser's install signal. Call once at boot. The
  *  browser fires `beforeinstallprompt` only when the app is installable and not
- *  already installed — capture it so you can show your own install button. */
-export const initInstallPrompt = () => {
+ *  already installed — we stash it so a custom button can call promptInstall().
+ *  By default we do NOT call preventDefault() (see {@link InstallPromptOptions}). */
+export const initInstallPrompt = (options: InstallPromptOptions = {}) => {
   if (typeof window === "undefined") return;
   window.addEventListener("beforeinstallprompt", (event) => {
-    event.preventDefault();
+    if (options.suppressBrowserPrompt) event.preventDefault();
     deferredPrompt = event as BeforeInstallPromptEvent;
     notifyInstallable(true);
   });
