@@ -90,11 +90,17 @@ await registerServiceWorker(); // defaults to "/sw.js"
 
 // Toggle on: returns the subscription JSON — POST it to your own route.
 const subscription = await subscribeToPush(vapidPublicKey);
-await fetch("/push/subscribe", { method: "POST", body: JSON.stringify(subscription) });
+await fetch("/push/subscribe", {
+  method: "POST",
+  body: JSON.stringify(subscription),
+});
 
 // Toggle off: returns the endpoint to drop server-side.
 const endpoint = await unsubscribeFromPush();
-await fetch("/push/unsubscribe", { method: "POST", body: JSON.stringify({ endpoint }) });
+await fetch("/push/unsubscribe", {
+  method: "POST",
+  body: JSON.stringify({ endpoint }),
+});
 
 const status = await getPushStatus(); // { supported, permission, subscribed }
 ```

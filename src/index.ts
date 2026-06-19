@@ -98,6 +98,20 @@ export type OfflineConfig = {
   cacheName?: string;
 };
 
+/** Re-register a rotated push subscription with no app open. Browsers
+ *  occasionally rotate a push subscription's keys and fire
+ *  `pushsubscriptionchange`; without handling it, the old endpoint silently
+ *  goes dead and the user stops getting push. With this set, the worker
+ *  re-subscribes with the same VAPID key and POSTs the fresh subscription
+ *  (`{ endpoint, keys }`, with cookies) back to the server. */
+export type PushResubscribeConfig = {
+  /** VAPID public key (base64url) — same one passed to `subscribeToPush`. */
+  applicationServerKey: string;
+  /** Same-origin endpoint that persists a subscription (the one the client
+   *  POSTs to on enable). Receives `{ endpoint, keys: { p256dh, auth } }`. */
+  subscribeUrl: string;
+};
+
 export type ServiceWorkerOptions = {
   /** Icon shown on the notification + as its badge. */
   icon?: string;
@@ -109,7 +123,39 @@ export type ServiceWorkerOptions = {
    *  client posts `SKIP_WAITING` (via applyUpdate). A fresh first install still
    *  activates right away regardless. */
   skipWaiting?: boolean;
+  /** Auto-recover a rotated push subscription via `pushsubscriptionchange`. */
+  resubscribe?: PushResubscribeConfig;
 };
+
+const resubscribeBlock = (resubscribe: PushResubscribeConfig): string => `
+var PWA_VAPID_KEY = ${JSON.stringify(resubscribe.applicationServerKey)};
+var PWA_SUBSCRIBE_URL = ${JSON.stringify(resubscribe.subscribeUrl)};
+function pwaB64ToUint8(base64) {
+  var padding = '='.repeat((4 - base64.length % 4) % 4);
+  var b64 = (base64 + padding).replace(/-/g, '+').replace(/_/g, '/');
+  var raw = self.atob(b64);
+  var out = new Uint8Array(raw.length);
+  for (var i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  return out;
+}
+// The browser rotated our subscription → re-subscribe with the same VAPID key
+// and re-register the fresh endpoint so push keeps flowing.
+self.addEventListener('pushsubscriptionchange', function (event) {
+  event.waitUntil(
+    self.registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: pwaB64ToUint8(PWA_VAPID_KEY)
+    }).then(function (sub) {
+      var json = sub.toJSON();
+      return fetch(PWA_SUBSCRIBE_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ endpoint: sub.endpoint, keys: json.keys })
+      });
+    }).catch(function () {})
+  );
+});`;
 
 const offlineBlock = (offline: OfflineConfig): string => {
   const cacheName = offline.cacheName ?? "pwa-cache-v1";
@@ -156,16 +202,22 @@ self.addEventListener('fetch', function (event) {
  *  `url`, or opens it). If the payload carries `actions` + `actionRequests`, the
  *  notification renders buttons and tapping one fires the matching authenticated
  *  request (same-origin, with cookies) instead of opening a tab. Pass `offline`
- *  to also cache an app shell + fallback page. The push payload should be JSON:
+ *  to also cache an app shell + fallback page, or `resubscribe` to auto-recover
+ *  a browser-rotated subscription. The push payload should be JSON:
  *  `{ title, body, url, tag, icon, badge, actions, actionRequests }`. */
-export const pushServiceWorker = (options: ServiceWorkerOptions = {}): string => {
+export const pushServiceWorker = (
+  options: ServiceWorkerOptions = {},
+): string => {
   const icon = options.icon ?? "";
   const badge = options.badge ?? options.icon ?? "";
   const offline = options.offline ? offlineBlock(options.offline) : "";
+  const resubscribe = options.resubscribe
+    ? resubscribeBlock(options.resubscribe)
+    : "";
 
   const installBody = options.skipWaiting ? "self.skipWaiting();" : "";
 
-  return `${offline}
+  return `${offline}${resubscribe}
 self.addEventListener('install', function () { ${installBody} });
 self.addEventListener('activate', function (event) {
   event.waitUntil(self.clients.claim());

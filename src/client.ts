@@ -181,7 +181,8 @@ export const clearAppBadge = () => setAppBadge(0);
  *  registerServiceWorker. Pair with applyUpdate() to swap + reload. Requires the
  *  SW built WITHOUT `skipWaiting` (the default), so updates wait for consent. */
 export const onUpdateAvailable = (onAvailable: () => void) => {
-  if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
+  if (typeof navigator === "undefined" || !("serviceWorker" in navigator))
+    return;
   let reloaded = false;
   navigator.serviceWorker.addEventListener("controllerchange", () => {
     if (reloaded) return;
@@ -189,7 +190,8 @@ export const onUpdateAvailable = (onAvailable: () => void) => {
     window.location.reload();
   });
   void navigator.serviceWorker.ready.then((registration) => {
-    if (registration.waiting && navigator.serviceWorker.controller) onAvailable();
+    if (registration.waiting && navigator.serviceWorker.controller)
+      onAvailable();
     registration.addEventListener("updatefound", () => {
       const next = registration.installing;
       if (!next) return;
@@ -205,7 +207,8 @@ export const onUpdateAvailable = (onAvailable: () => void) => {
 /** Activate the waiting worker; the page reloads automatically once it takes
  *  control. Call from the "reload" action of your update prompt. */
 export const applyUpdate = async () => {
-  if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
+  if (typeof navigator === "undefined" || !("serviceWorker" in navigator))
+    return;
   const registration = await navigator.serviceWorker.getRegistration();
   registration?.waiting?.postMessage("SKIP_WAITING");
 };
