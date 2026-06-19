@@ -157,3 +157,55 @@ export const promptInstall = async (): Promise<boolean> => {
 
   return choice.outcome === "accepted";
 };
+
+// ── App icon badge ────────────────────────────────────────────────────────────
+
+/** Set the installed-app icon badge to `count` (0 or omitted clears it). No-op
+ *  where the Badging API is unavailable (most non-installed contexts). */
+export const setAppBadge = (count?: number) => {
+  if (typeof navigator === "undefined" || !("setAppBadge" in navigator)) return;
+  if (count && count > 0) {
+    void navigator.setAppBadge(count).catch(() => undefined);
+  } else {
+    void navigator.clearAppBadge().catch(() => undefined);
+  }
+};
+
+/** Clear the app icon badge. */
+export const clearAppBadge = () => setAppBadge(0);
+
+// ── App update flow ───────────────────────────────────────────────────────────
+
+/** Fire `onAvailable` when a new service worker has installed and is waiting to
+ *  activate (a new app version is ready). Call once at boot, after
+ *  registerServiceWorker. Pair with applyUpdate() to swap + reload. Requires the
+ *  SW built WITHOUT `skipWaiting` (the default), so updates wait for consent. */
+export const onUpdateAvailable = (onAvailable: () => void) => {
+  if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
+  let reloaded = false;
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (reloaded) return;
+    reloaded = true;
+    window.location.reload();
+  });
+  void navigator.serviceWorker.ready.then((registration) => {
+    if (registration.waiting && navigator.serviceWorker.controller) onAvailable();
+    registration.addEventListener("updatefound", () => {
+      const next = registration.installing;
+      if (!next) return;
+      next.addEventListener("statechange", () => {
+        if (next.state === "installed" && navigator.serviceWorker.controller) {
+          onAvailable();
+        }
+      });
+    });
+  });
+};
+
+/** Activate the waiting worker; the page reloads automatically once it takes
+ *  control. Call from the "reload" action of your update prompt. */
+export const applyUpdate = async () => {
+  if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
+  const registration = await navigator.serviceWorker.getRegistration();
+  registration?.waiting?.postMessage("SKIP_WAITING");
+};

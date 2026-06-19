@@ -16,6 +16,25 @@ export type PwaIcon = {
   purpose?: string;
 };
 
+/** An app shortcut — a jump target the OS exposes on the icon's context menu
+ *  (right-click the dock/taskbar icon, long-press on mobile). */
+export type WebAppShortcut = {
+  name: string;
+  short_name?: string;
+  description?: string;
+  url: string;
+  icons?: PwaIcon[];
+};
+
+/** Register the app as an OS share target. The OS posts the shared content to
+ *  `action`; `params` maps the shared title/text/url onto your query/form keys. */
+export type WebShareTarget = {
+  action: string;
+  method?: "GET" | "POST";
+  enctype?: string;
+  params: { title?: string; text?: string; url?: string };
+};
+
 export type WebAppManifestConfig = {
   name: string;
   shortName: string;
@@ -26,6 +45,8 @@ export type WebAppManifestConfig = {
   display?: "standalone" | "fullscreen" | "minimal-ui" | "browser";
   startUrl?: string;
   scope?: string;
+  shortcuts?: WebAppShortcut[];
+  shareTarget?: WebShareTarget;
 };
 
 export type WebAppManifest = {
@@ -38,6 +59,8 @@ export type WebAppManifest = {
   display: string;
   start_url: string;
   scope: string;
+  shortcuts?: WebAppShortcut[];
+  share_target?: WebShareTarget;
 };
 
 /** Build a spec-shaped web app manifest from a friendly config. Serve the
@@ -51,7 +74,9 @@ export const createWebAppManifest = (
   icons: config.icons,
   name: config.name,
   scope: config.scope ?? "/",
+  ...(config.shareTarget ? { share_target: config.shareTarget } : {}),
   short_name: config.shortName,
+  ...(config.shortcuts ? { shortcuts: config.shortcuts } : {}),
   start_url: config.startUrl ?? "/",
   theme_color: config.themeColor ?? "#000000",
 });
@@ -79,6 +104,11 @@ export type ServiceWorkerOptions = {
   badge?: string;
   /** Enable offline caching + a fallback page. Omit for push-only (no fetch handler). */
   offline?: OfflineConfig;
+  /** Activate a new worker immediately on install (default false). Leave false to
+   *  support an in-app "new version — reload" prompt: the new SW waits until the
+   *  client posts `SKIP_WAITING` (via applyUpdate). A fresh first install still
+   *  activates right away regardless. */
+  skipWaiting?: boolean;
 };
 
 const offlineBlock = (offline: OfflineConfig): string => {
@@ -133,15 +163,28 @@ export const pushServiceWorker = (options: ServiceWorkerOptions = {}): string =>
   const badge = options.badge ?? options.icon ?? "";
   const offline = options.offline ? offlineBlock(options.offline) : "";
 
+  const installBody = options.skipWaiting ? "self.skipWaiting();" : "";
+
   return `${offline}
-self.addEventListener('install', function () { self.skipWaiting(); });
+self.addEventListener('install', function () { ${installBody} });
 self.addEventListener('activate', function (event) {
   event.waitUntil(self.clients.claim());
+});
+// The client posts this (applyUpdate) to swap to a freshly-installed worker.
+self.addEventListener('message', function (event) {
+  if (event.data === 'SKIP_WAITING' || (event.data && event.data.type === 'SKIP_WAITING')) {
+    self.skipWaiting();
+  }
 });
 self.addEventListener('push', function (event) {
   var data = {};
   try { data = event.data ? event.data.json() : {}; }
   catch (e) { data = { title: 'Notification', body: event.data ? event.data.text() : '' }; }
+  // Reflect an unread count onto the app icon, even when no window is open.
+  if (typeof data.badgeCount === 'number' && self.navigator && self.navigator.setAppBadge) {
+    if (data.badgeCount > 0) self.navigator.setAppBadge(data.badgeCount);
+    else if (self.navigator.clearAppBadge) self.navigator.clearAppBadge();
+  }
   var title = data.title || 'Notification';
   event.waitUntil(self.registration.showNotification(title, {
     body: data.body || '',
@@ -224,6 +267,9 @@ export type WebPushPayload = {
   /** Per-action request the SW fires on tap (action id → request). When an
    *  action has a request, the SW fetches it instead of opening `url`. */
   actionRequests?: Record<string, WebPushActionRequest>;
+  /** Unread/pending count to show on the app icon badge (0 clears it). The SW
+   *  applies it on receipt, so the badge updates even with no window open. */
+  badgeCount?: number;
 };
 
 export type WebPushConfig = {
