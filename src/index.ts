@@ -123,8 +123,11 @@ self.addEventListener('fetch', function (event) {
 /** The push service-worker script (a string to serve at e.g. `/sw.js` with a
  *  `Service-Worker-Allowed: /` header). Handles `push` (renders the payload as a
  *  notification) and `notificationclick` (focuses an open tab on the payload's
- *  `url`, or opens it). Pass `offline` to also cache an app shell + fallback
- *  page. The push payload should be JSON: `{ title, body, url, tag, icon, badge }`. */
+ *  `url`, or opens it). If the payload carries `actions` + `actionRequests`, the
+ *  notification renders buttons and tapping one fires the matching authenticated
+ *  request (same-origin, with cookies) instead of opening a tab. Pass `offline`
+ *  to also cache an app shell + fallback page. The push payload should be JSON:
+ *  `{ title, body, url, tag, icon, badge, actions, actionRequests }`. */
 export const pushServiceWorker = (options: ServiceWorkerOptions = {}): string => {
   const icon = options.icon ?? "";
   const badge = options.badge ?? options.icon ?? "";
@@ -145,12 +148,30 @@ self.addEventListener('push', function (event) {
     icon: data.icon || ${JSON.stringify(icon)},
     badge: data.badge || ${JSON.stringify(badge)},
     tag: data.tag,
-    data: { url: data.url || '/' }
+    actions: Array.isArray(data.actions) ? data.actions : [],
+    data: { url: data.url || '/', actionRequests: data.actionRequests || {} }
   }));
 });
 self.addEventListener('notificationclick', function (event) {
+  var d = event.notification.data || {};
+  var reqs = d.actionRequests || {};
+  // An action button with a configured request → fire it (same-origin, with
+  // cookies) and dismiss, without opening a tab. The server re-checks the caller.
+  if (event.action && reqs[event.action]) {
+    var r = reqs[event.action];
+    event.notification.close();
+    event.waitUntil(
+      fetch(r.url, {
+        method: r.method || 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(r.body || {})
+      }).catch(function () {})
+    );
+    return;
+  }
   event.notification.close();
-  var target = (event.notification.data && event.notification.data.url) || '/';
+  var target = d.url || '/';
   event.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function (list) {
       for (var i = 0; i < list.length; i++) {
@@ -171,6 +192,26 @@ export type WebPushSubscription = {
   keys: { p256dh: string; auth: string };
 };
 
+/** A notification action button (rendered by the OS under the notification). */
+export type WebPushAction = {
+  /** Identifies the button; echoed back as `event.action` on click. */
+  action: string;
+  title: string;
+  icon?: string;
+};
+
+/** Tells the service worker what authenticated request to fire when a given
+ *  notification action is tapped — keyed by the action id. The fetch is sent
+ *  same-origin with `credentials: 'include'`, so the server re-validates the
+ *  caller from the session cookie (a spoofed push can't forge it). */
+export type WebPushActionRequest = {
+  url: string;
+  /** Defaults to "POST". */
+  method?: string;
+  /** JSON-serialized as the request body. */
+  body?: unknown;
+};
+
 export type WebPushPayload = {
   title: string;
   body: string;
@@ -178,6 +219,11 @@ export type WebPushPayload = {
   tag?: string;
   icon?: string;
   badge?: string;
+  /** Action buttons shown on the notification. */
+  actions?: WebPushAction[];
+  /** Per-action request the SW fires on tap (action id → request). When an
+   *  action has a request, the SW fetches it instead of opening `url`. */
+  actionRequests?: Record<string, WebPushActionRequest>;
 };
 
 export type WebPushConfig = {
