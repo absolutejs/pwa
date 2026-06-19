@@ -58,22 +58,79 @@ export const createWebAppManifest = (
 
 // ── Service worker ──────────────────────────────────────────────────────────
 
+/** Opt-in offline support for the service worker. When set, the SW precaches the
+ *  `fallback` page (+ any `precache` URLs) on install, serves navigations
+ *  network-first with the cached fallback when offline, and serves same-origin
+ *  requests under `assetPrefix` cache-first (good for content-hashed bundles). */
+export type OfflineConfig = {
+  /** A precached page served when a navigation fails offline (e.g. "/offline.html"). */
+  fallback: string;
+  /** Extra same-origin URLs to precache on install. */
+  precache?: string[];
+  /** Same-origin path prefix to serve cache-first (e.g. "/assets/"). */
+  assetPrefix?: string;
+  /** Cache bucket name — bump it to invalidate old caches. */
+  cacheName?: string;
+};
+
 export type ServiceWorkerOptions = {
   /** Icon shown on the notification + as its badge. */
   icon?: string;
   badge?: string;
+  /** Enable offline caching + a fallback page. Omit for push-only (no fetch handler). */
+  offline?: OfflineConfig;
+};
+
+const offlineBlock = (offline: OfflineConfig): string => {
+  const cacheName = offline.cacheName ?? "pwa-cache-v1";
+  const precache = [offline.fallback, ...(offline.precache ?? [])];
+  const assetPrefix = offline.assetPrefix ?? "";
+
+  return `
+var PWA_CACHE = ${JSON.stringify(cacheName)};
+var PWA_PRECACHE = ${JSON.stringify(precache)};
+var PWA_FALLBACK = ${JSON.stringify(offline.fallback)};
+var PWA_ASSET_PREFIX = ${JSON.stringify(assetPrefix)};
+self.addEventListener('install', function (event) {
+  event.waitUntil(caches.open(PWA_CACHE).then(function (c) { return c.addAll(PWA_PRECACHE); }));
+});
+self.addEventListener('activate', function (event) {
+  event.waitUntil(caches.keys().then(function (keys) {
+    return Promise.all(keys.filter(function (k) { return k !== PWA_CACHE; }).map(function (k) { return caches.delete(k); }));
+  }));
+});
+self.addEventListener('fetch', function (event) {
+  var req = event.request;
+  if (req.method !== 'GET') return;
+  var url = new URL(req.url);
+  if (url.origin !== self.location.origin) return;
+  if (req.mode === 'navigate') {
+    event.respondWith(fetch(req).catch(function () { return caches.match(PWA_FALLBACK); }));
+    return;
+  }
+  if (PWA_ASSET_PREFIX && url.pathname.indexOf(PWA_ASSET_PREFIX) === 0) {
+    event.respondWith(caches.match(req).then(function (cached) {
+      return cached || fetch(req).then(function (res) {
+        var copy = res.clone();
+        caches.open(PWA_CACHE).then(function (c) { c.put(req, copy); });
+        return res;
+      });
+    }));
+  }
+});`;
 };
 
 /** The push service-worker script (a string to serve at e.g. `/sw.js` with a
  *  `Service-Worker-Allowed: /` header). Handles `push` (renders the payload as a
  *  notification) and `notificationclick` (focuses an open tab on the payload's
- *  `url`, or opens it). The push payload should be JSON: `{ title, body, url,
- *  tag, icon, badge }`. */
+ *  `url`, or opens it). Pass `offline` to also cache an app shell + fallback
+ *  page. The push payload should be JSON: `{ title, body, url, tag, icon, badge }`. */
 export const pushServiceWorker = (options: ServiceWorkerOptions = {}): string => {
   const icon = options.icon ?? "";
   const badge = options.badge ?? options.icon ?? "";
+  const offline = options.offline ? offlineBlock(options.offline) : "";
 
-  return `
+  return `${offline}
 self.addEventListener('install', function () { self.skipWaiting(); });
 self.addEventListener('activate', function (event) {
   event.waitUntil(self.clients.claim());

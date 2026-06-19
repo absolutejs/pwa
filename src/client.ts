@@ -96,3 +96,55 @@ export const unsubscribeFromPush = async (): Promise<string | null> => {
 
   return endpoint;
 };
+
+// ── Install prompt ───────────────────────────────────────────────────────────
+
+type BeforeInstallPromptEvent = Event & {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
+};
+
+let deferredPrompt: BeforeInstallPromptEvent | null = null;
+const installListeners = new Set<(installable: boolean) => void>();
+const notifyInstallable = (installable: boolean) => {
+  installListeners.forEach((listener) => listener(installable));
+};
+
+/** Start listening for the browser's install signal. Call once at boot. The
+ *  browser fires `beforeinstallprompt` only when the app is installable and not
+ *  already installed — capture it so you can show your own install button. */
+export const initInstallPrompt = () => {
+  if (typeof window === "undefined") return;
+  window.addEventListener("beforeinstallprompt", (event) => {
+    event.preventDefault();
+    deferredPrompt = event as BeforeInstallPromptEvent;
+    notifyInstallable(true);
+  });
+  window.addEventListener("appinstalled", () => {
+    deferredPrompt = null;
+    notifyInstallable(false);
+  });
+};
+
+/** Whether a deferred install prompt is currently available. */
+export const canInstall = () => deferredPrompt !== null;
+
+/** Subscribe to installability changes (true when a prompt becomes available,
+ *  false once used or after install). Returns an unsubscribe fn. */
+export const onInstallable = (listener: (installable: boolean) => void) => {
+  installListeners.add(listener);
+
+  return () => installListeners.delete(listener);
+};
+
+/** Show the native install prompt (must be called from a user gesture). Returns
+ *  true if the user accepted. No-ops to false when no prompt is pending. */
+export const promptInstall = async (): Promise<boolean> => {
+  if (!deferredPrompt) return false;
+  await deferredPrompt.prompt();
+  const choice = await deferredPrompt.userChoice;
+  deferredPrompt = null;
+  notifyInstallable(false);
+
+  return choice.outcome === "accepted";
+};

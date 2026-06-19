@@ -35,8 +35,13 @@ export const manifest = createWebAppManifest({
   ],
 });
 
-// Serve as text/javascript at /sw.js with header `Service-Worker-Allowed: /`
-export const sw = pushServiceWorker({ icon: ICON });
+// Serve as text/javascript at /sw.js with header `Service-Worker-Allowed: /`.
+// Pass `offline` to also precache an app shell + serve a fallback page when a
+// navigation fails offline, and cache same-origin assets cache-first.
+export const sw = pushServiceWorker({
+  icon: ICON,
+  offline: { fallback: "/offline.html", assetPrefix: "/assets/" },
+});
 
 // VAPID sender — pass empty/unset keys and it no-ops (isConfigured() === false),
 // so push degrades gracefully to your email/in-app fallback.
@@ -92,6 +97,27 @@ const endpoint = await unsubscribeFromPush();
 await fetch("/push/unsubscribe", { method: "POST", body: JSON.stringify({ endpoint }) });
 
 const status = await getPushStatus(); // { supported, permission, subscribed }
+```
+
+### Install prompt
+
+Capture the browser's install signal and drive it from your own button:
+
+```ts
+import {
+  initInstallPrompt,
+  onInstallable,
+  promptInstall,
+  canInstall,
+} from "@absolutejs/pwa/client";
+
+initInstallPrompt(); // once at boot
+
+// React to availability (show/hide your install button):
+const off = onInstallable((installable) => setShowInstall(installable));
+
+// From a click handler (must be a user gesture):
+const accepted = await promptInstall();
 ```
 
 Every client function is feature-safe (no-ops when the APIs are missing or during
