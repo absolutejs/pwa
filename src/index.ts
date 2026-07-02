@@ -86,13 +86,14 @@ export const createWebAppManifest = (
 /** Opt-in offline support for the service worker. When set, the SW precaches the
  *  `fallback` page (+ any `precache` URLs) on install, serves navigations
  *  network-first with the cached fallback when offline, and serves same-origin
- *  requests under `assetPrefix` cache-first (good for content-hashed bundles). */
+ *  requests under `assetPrefix` stale-while-revalidate (instant from cache, then
+ *  refetched in the background) so assets under a stable filename still update. */
 export type OfflineConfig = {
   /** A precached page served when a navigation fails offline (e.g. "/offline.html"). */
   fallback: string;
   /** Extra same-origin URLs to precache on install. */
   precache?: string[];
-  /** Same-origin path prefix to serve cache-first (e.g. "/assets/"). */
+  /** Same-origin path prefix served stale-while-revalidate (e.g. "/assets/"). */
   assetPrefix?: string;
   /** Cache bucket name — bump it to invalidate old caches. */
   cacheName?: string;
@@ -185,11 +186,22 @@ self.addEventListener('fetch', function (event) {
     return;
   }
   if (PWA_ASSET_PREFIX && url.pathname.indexOf(PWA_ASSET_PREFIX) === 0) {
-    event.respondWith(caches.match(req).then(function (cached) {
-      return cached || fetch(req).then(function (res) {
-        var copy = res.clone();
-        caches.open(PWA_CACHE).then(function (c) { c.put(req, copy); });
-        return res;
+    // Stale-while-revalidate: serve the cached copy instantly (fast + offline),
+    // but ALWAYS refetch in the background and update the cache. Plain cache-first
+    // would pin an asset served under a STABLE (non-content-hashed) filename —
+    // e.g. a generated CSS bundle — forever, so a new deploy never reached an
+    // installed PWA until cacheName was bumped. SWR self-heals: the next load
+    // gets the fresh asset. Only cache successful, non-opaque responses.
+    event.respondWith(caches.open(PWA_CACHE).then(function (c) {
+      return c.match(req).then(function (cached) {
+        var fetching = fetch(req).then(function (res) {
+          if (res && res.status === 200 && res.type === 'basic') {
+            c.put(req, res.clone());
+          }
+          return res;
+        }).catch(function () { return cached; });
+
+        return cached || fetching;
       });
     }));
   }
