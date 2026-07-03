@@ -201,6 +201,13 @@ self.addEventListener('fetch', function (event) {
           return res;
         }).catch(function () { return cached; });
 
+        // When serving from cache, keep the worker alive until the background
+        // revalidation lands. Without waitUntil the browser may terminate the
+        // SW as soon as the cached response is returned — the refetch dies
+        // mid-flight, the cache never updates, and SWR silently degrades back
+        // to cache-first (stale assets across deploys).
+        if (cached) event.waitUntil(fetching.catch(function () {}));
+
         return cached || fetching;
       });
     }));
