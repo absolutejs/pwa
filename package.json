@@ -1,7 +1,7 @@
 {
   "name": "@absolutejs/pwa",
-  "version": "0.6.1",
-  "description": "Framework-agnostic PWA + Web Push primitives \u2014 web app manifest, push service worker, VAPID sender, and browser subscription glue",
+  "version": "0.6.2",
+  "description": "Framework-agnostic PWA + Web Push primitives — web app manifest, push service worker, VAPID sender, and browser subscription glue",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/absolutejs/pwa.git"
