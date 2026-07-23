@@ -45,7 +45,7 @@ const iconSchema = Type.Object(
 );
 
 export const manifest = defineManifest<PwaConfig, WebPushSender>()({
-  contract: 1,
+  contract: 2,
   identity: {
     accent: "#6366f1",
     category: "growth",
@@ -229,6 +229,12 @@ export const manifest = defineManifest<PwaConfig, WebPushSender>()({
   tools: {
     push_status: tool.runtime({
       annotations: { readOnlyHint: true },
+      authorization: {
+        approval: "never",
+        audience: "owner",
+        effects: ["read"],
+        requiredScopes: ["pwa:push:read"],
+      },
       description:
         "Whether Web Push is configured (VAPID keys present). When unconfigured, sends no-op gracefully.",
       handler: (_input, push) =>
@@ -238,7 +244,17 @@ export const manifest = defineManifest<PwaConfig, WebPushSender>()({
       input: Type.Object({}),
     }),
     send_test_push: tool.runtime({
-      annotations: { openWorldHint: true },
+      annotations: { idempotentHint: true, openWorldHint: true },
+      authorization: {
+        approval: "always",
+        audience: "owner",
+        destinationFields: ["endpoint"],
+        effects: ["send", "external-network"],
+        idempotency: { mode: "host" },
+        requiredScopes: ["pwa:push:send"],
+        resource: { idField: "endpoint", type: "push-subscription" },
+        reversible: false,
+      },
       description:
         "Send one push notification to a specific subscription (endpoint + keys, as stored when the visitor enabled push). Reports whether the push service accepted it and whether the endpoint is permanently gone (prune it if so).",
       handler: async ({ auth, body, endpoint, p256dh, title, url }, push) => {
