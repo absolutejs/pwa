@@ -1,6 +1,6 @@
 {
   "name": "@absolutejs/pwa",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Framework-agnostic PWA + Web Push primitives — web app manifest, push service worker, VAPID sender, and browser subscription glue",
   "repository": {
     "type": "git",
@@ -31,6 +31,7 @@
   "scripts": {
     "build": "rm -rf dist && bun build src/index.ts src/client.ts src/manifest.ts --root ./src --outdir dist --sourcemap --target=bun --external web-push && tsc --project tsconfig.build.json && absolute-manifest emit",
     "typecheck": "tsc --noEmit",
+    "test": "bun test",
     "format": "prettier --write \"./**/*.{ts,json,md}\"",
     "release": "bun run format && bun run typecheck && bun run build && bun publish"
   },

@@ -306,6 +306,30 @@ export type WebPushSubscription = {
   keys: { p256dh: string; auth: string };
 };
 
+/** Validate and normalize browser `PushSubscription.toJSON()` output at a
+ * server boundary. Returns null for malformed or non-HTTPS subscriptions so
+ * hosts do not have to hand-roll credential parsing. */
+export const parseWebPushSubscription = (
+  value: unknown,
+): WebPushSubscription | null => {
+  if (!isRecord(value) || typeof value.endpoint !== "string") return null;
+  if (!isRecord(value.keys)) return null;
+  const { auth, p256dh } = value.keys;
+  if (typeof auth !== "string" || typeof p256dh !== "string") return null;
+  if (auth.length === 0 || p256dh.length === 0) return null;
+  try {
+    const endpoint = new URL(value.endpoint);
+    if (endpoint.protocol !== "https:") return null;
+
+    return {
+      endpoint: endpoint.toString(),
+      keys: { auth, p256dh },
+    };
+  } catch {
+    return null;
+  }
+};
+
 /** A notification action button (rendered by the OS under the notification). */
 export type WebPushAction = {
   /** Identifies the button; echoed back as `event.action` on click. */

@@ -90,7 +90,8 @@ export const manifest = defineManifest<PwaConfig, WebPushSender>()({
           ),
           description: Type.Optional(
             Type.String({
-              description: "One sentence about the app, shown by app stores and install prompts.",
+              description:
+                "One sentence about the app, shown by app stores and install prompts.",
               title: "App description",
             }),
           ),
@@ -120,14 +121,12 @@ export const manifest = defineManifest<PwaConfig, WebPushSender>()({
           }),
           scope: Type.Optional(
             Type.String({
-              description:
-                "URL scope the installed app controls (default /).",
+              description: "URL scope the installed app controls (default /).",
               title: "Scope",
             }),
           ),
           shortName: Type.String({
-            description:
-              "Short name shown under the icon on the home screen.",
+            description: "Short name shown under the icon on the home screen.",
             title: "Short name",
           }),
           startUrl: Type.Optional(
@@ -242,54 +241,6 @@ export const manifest = defineManifest<PwaConfig, WebPushSender>()({
           ? "web push is configured (VAPID keys present)"
           : "web push is NOT configured — set VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY",
       input: Type.Object({}),
-    }),
-    send_test_push: tool.runtime({
-      annotations: { idempotentHint: true, openWorldHint: true },
-      authorization: {
-        approval: "always",
-        audience: "owner",
-        destinationFields: ["endpoint"],
-        effects: ["send", "external-network"],
-        idempotency: { mode: "host" },
-        requiredScopes: ["pwa:push:send"],
-        resource: { idField: "endpoint", type: "push-subscription" },
-        reversible: false,
-      },
-      description:
-        "Send one push notification to a specific subscription (endpoint + keys, as stored when the visitor enabled push). Reports whether the push service accepted it and whether the endpoint is permanently gone (prune it if so).",
-      handler: async ({ auth, body, endpoint, p256dh, title, url }, push) => {
-        const result = await push.send(
-          { endpoint, keys: { auth, p256dh } },
-          { body, title, ...(url !== undefined ? { url } : {}) },
-        );
-
-        return result.ok
-          ? "push accepted by the push service"
-          : result.gone
-            ? "endpoint is permanently gone (404/410) — remove this subscription from storage"
-            : "push failed (not configured, or the push service rejected it)";
-      },
-      input: Type.Object({
-        auth: Type.String({
-          description: "The subscription's auth key.",
-          minLength: 1,
-        }),
-        body: Type.String({ minLength: 1 }),
-        endpoint: Type.String({
-          description: "The subscription's push-service endpoint URL.",
-          format: "uri",
-        }),
-        p256dh: Type.String({
-          description: "The subscription's p256dh key.",
-          minLength: 1,
-        }),
-        title: Type.String({ minLength: 1 }),
-        url: Type.Optional(
-          Type.String({
-            description: "Page opened when the notification is tapped.",
-          }),
-        ),
-      }),
     }),
   },
   wiring: [
