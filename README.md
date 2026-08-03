@@ -120,6 +120,30 @@ const off = onInstallable((installable) => setShowInstall(installable));
 const accepted = await promptInstall();
 ```
 
+### Embedded browsers and capability UX
+
+Feature-detect before offering browser-dependent actions, then use embedded-
+browser identity only to explain an unavailable capability:
+
+```ts
+import {
+  detectEmbeddedBrowser,
+  getBrowserCapabilities,
+} from "@absolutejs/pwa/client";
+
+const capabilities = getBrowserCapabilities();
+if (!capabilities.pushNotifications && capabilities.embeddedBrowser) {
+  showOpenInBrowserHelp(capabilities.embeddedBrowser.app);
+}
+
+// Pure user-agent classification is also available for SSR/tests.
+detectEmbeddedBrowser(request.headers.get("user-agent") ?? "");
+```
+
+Detection is deliberately conservative: Facebook, Instagram, and Messenger are
+identified only from their explicit host-app markers. Unknown WebViews return
+`null`; capability checks remain authoritative.
+
 Every client function is feature-safe (no-ops when the APIs are missing or during
 SSR). `subscribeToPush` throws `Error("notification-permission-denied")` on a hard
 permission denial so you can message it.

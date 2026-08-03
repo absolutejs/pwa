@@ -6,11 +6,95 @@
 
 const BASE64_GROUP = 4;
 
-const supportsPush = () =>
-  typeof window !== "undefined" &&
-  "serviceWorker" in navigator &&
-  "PushManager" in window &&
-  "Notification" in window;
+type BeforeInstallPromptEvent = Event & {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
+};
+
+let deferredPrompt: BeforeInstallPromptEvent | null = null;
+
+export type EmbeddedBrowserApp = "facebook" | "instagram" | "messenger";
+export type EmbeddedBrowserPlatform = "android" | "ios" | "unknown";
+
+export type EmbeddedBrowser = {
+  app: EmbeddedBrowserApp;
+  platform: EmbeddedBrowserPlatform;
+};
+
+const currentUserAgent = () =>
+  typeof navigator === "undefined" ? "" : navigator.userAgent;
+
+/** Identify common social-app embedded browsers from their explicit host-app
+ *  user-agent markers. Returns null for ordinary browsers and unknown hosts so
+ *  callers do not degrade UX based on a broad mobile-WebKit guess. */
+export const detectEmbeddedBrowser = (
+  userAgent = currentUserAgent(),
+): EmbeddedBrowser | null => {
+  const platform: EmbeddedBrowserPlatform = /android/i.test(userAgent)
+    ? "android"
+    : /iphone|ipad|ipod/i.test(userAgent)
+      ? "ios"
+      : "unknown";
+
+  if (/instagram/i.test(userAgent)) return { app: "instagram", platform };
+  if (
+    /FBAN\/MessengerForiOS|FBAN\/MESSENGER|\bMessengerForAndroid\b/i.test(
+      userAgent,
+    )
+  ) {
+    return { app: "messenger", platform };
+  }
+  if (/\[FBAN\/(?:FBIOS|FB4A);|\bFB_IAB\/FB4A\b/i.test(userAgent)) {
+    return { app: "facebook", platform };
+  }
+
+  return null;
+};
+
+export type BrowserCapabilities = {
+  clipboardWrite: boolean;
+  embeddedBrowser: EmbeddedBrowser | null;
+  installPrompt: boolean;
+  mediaCapture: boolean;
+  passkeys: boolean;
+  pushNotifications: boolean;
+  serviceWorker: boolean;
+  webShare: boolean;
+};
+
+/** Snapshot browser capabilities for action-level UX. Feature checks remain the
+ *  source of truth; embedded-browser identity is context for explaining why a
+ *  capability is unavailable, never a substitute for a feature check. */
+export const getBrowserCapabilities = (): BrowserCapabilities => {
+  if (typeof window === "undefined" || typeof navigator === "undefined") {
+    return {
+      clipboardWrite: false,
+      embeddedBrowser: null,
+      installPrompt: false,
+      mediaCapture: false,
+      passkeys: false,
+      pushNotifications: false,
+      serviceWorker: false,
+      webShare: false,
+    };
+  }
+
+  const serviceWorker = "serviceWorker" in navigator;
+
+  return {
+    clipboardWrite: typeof navigator.clipboard?.writeText === "function",
+    embeddedBrowser: detectEmbeddedBrowser(),
+    installPrompt: deferredPrompt !== null,
+    mediaCapture: typeof navigator.mediaDevices?.getUserMedia === "function",
+    passkeys: "PublicKeyCredential" in window,
+    pushNotifications:
+      serviceWorker && "PushManager" in window && "Notification" in window,
+    serviceWorker,
+    webShare: typeof navigator.share === "function",
+  };
+};
+
+const supportsPush = () => getBrowserCapabilities().pushNotifications;
 
 // VAPID public key (base64url) → the Uint8Array applicationServerKey expects.
 const urlBase64ToUint8Array = (base64: string) => {
@@ -99,12 +183,6 @@ export const unsubscribeFromPush = async (): Promise<string | null> => {
 
 // ── Install prompt ───────────────────────────────────────────────────────────
 
-type BeforeInstallPromptEvent = Event & {
-  prompt: () => Promise<void>;
-  userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
-};
-
-let deferredPrompt: BeforeInstallPromptEvent | null = null;
 const installListeners = new Set<(installable: boolean) => void>();
 const notifyInstallable = (installable: boolean) => {
   installListeners.forEach((listener) => listener(installable));
