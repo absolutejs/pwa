@@ -85,7 +85,8 @@ import {
   unsubscribeFromPush,
 } from "@absolutejs/pwa/client";
 
-// At boot:
+// At boot. By default this waits for page load, then retries transient
+// browser/network failures up to three total attempts.
 await registerServiceWorker(); // defaults to "/sw.js"
 
 // Toggle on: returns the subscription JSON — send it through your typed API.

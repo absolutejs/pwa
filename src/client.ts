@@ -112,11 +112,64 @@ const urlBase64ToUint8Array = (base64: string) => {
   return output;
 };
 
+export type ServiceWorkerRegistrationRetryOptions = {
+  /** Wait for the document load event before competing for the network. Default
+   *  true. */
+  deferUntilLoad?: boolean;
+  /** Total registration attempts for transient browser/network failures.
+   *  Default 3. */
+  maxAttempts?: number;
+  /** Initial retry delay. Later retries use exponential backoff. Default
+   *  1000ms. */
+  retryDelayMs?: number;
+};
+
+const TRANSIENT_SERVICE_WORKER_ERRORS = new Set([
+  "AbortError",
+  "NetworkError",
+  "TimeoutError",
+  "TypeError",
+]);
+
+const waitForDocumentLoad = async (): Promise<void> => {
+  if (typeof document === "undefined" || document.readyState === "complete")
+    return;
+
+  await new Promise<void>((resolve) => {
+    window.addEventListener("load", () => resolve(), { once: true });
+  });
+};
+
+const errorName = (error: unknown): string =>
+  error instanceof Error ? error.name : "";
+
 /** Register the service worker (installability + push delivery). Safe to call on
- *  every boot; a failed registration is swallowed so it never breaks page load. */
-export const registerServiceWorker = async (path = "/sw.js") => {
+ *  every boot. Registration waits for page load by default and retries transient
+ *  browser/network failures; terminal failures are swallowed so they never break
+ *  page load. */
+export const registerServiceWorker = async (
+  path = "/sw.js",
+  options: ServiceWorkerRegistrationRetryOptions = {},
+) => {
   if (typeof window === "undefined" || !("serviceWorker" in navigator)) return;
-  await navigator.serviceWorker.register(path).catch(() => undefined);
+  if (options.deferUntilLoad !== false) await waitForDocumentLoad();
+
+  const maxAttempts = Math.max(1, Math.trunc(options.maxAttempts ?? 3));
+  const retryDelayMs = Math.max(0, options.retryDelayMs ?? 1000);
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      await navigator.serviceWorker.register(path);
+      return;
+    } catch (error) {
+      const mayRetry =
+        attempt + 1 < maxAttempts &&
+        TRANSIENT_SERVICE_WORKER_ERRORS.has(errorName(error));
+      if (!mayRetry) return;
+      await new Promise((resolve) =>
+        setTimeout(resolve, retryDelayMs * 2 ** attempt),
+      );
+    }
+  }
 };
 
 export type PushStatus = {
