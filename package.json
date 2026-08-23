@@ -37,7 +37,7 @@
   },
   "dependencies": {
     "web-push": "^3.6.7",
-    "@absolutejs/manifest": "^0.4.0",
+    "@absolutejs/manifest": "^0.9.0",
     "@sinclair/typebox": "^0.34.0"
   },
   "devDependencies": {

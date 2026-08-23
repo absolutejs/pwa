@@ -307,39 +307,137 @@ export const clearAppBadge = () => setAppBadge(0);
 
 // ── App update flow ───────────────────────────────────────────────────────────
 
-/** Fire `onAvailable` when a new service worker has installed and is waiting to
- *  activate (a new app version is ready). Call once at boot, after
- *  registerServiceWorker. Pair with applyUpdate() to swap + reload. Requires the
- *  SW built WITHOUT `skipWaiting` (the default), so updates wait for consent. */
-export const onUpdateAvailable = (onAvailable: () => void) => {
-  if (typeof navigator === "undefined" || !("serviceWorker" in navigator))
+export type AppUpdateSource = "release-probe" | "service-worker";
+
+export type AppUpdate = {
+  currentRelease?: string;
+  newestRelease?: string;
+  sources: readonly AppUpdateSource[];
+};
+
+export type AppUpdateSignal = {
+  currentRelease?: string;
+  newestRelease?: string;
+  source: AppUpdateSource;
+};
+
+export type ApplyUpdateOptions = {
+  /** Maximum wait for a waiting service worker to take control before a hard
+   *  reload. Default 5000ms. */
+  activationTimeoutMs?: number;
+};
+
+const updateListeners = new Set<(update: AppUpdate) => void>();
+const updateSources = new Set<AppUpdateSource>();
+let currentRelease: string | undefined;
+let newestRelease: string | undefined;
+let observingServiceWorker = false;
+let applyingUpdate: Promise<void> | undefined;
+
+const updateSnapshot = (): AppUpdate => ({
+  ...(currentRelease === undefined ? {} : { currentRelease }),
+  ...(newestRelease === undefined ? {} : { newestRelease }),
+  sources: [...updateSources],
+});
+
+/** Latch an app update discovered outside the service-worker lifecycle, such as
+ *  a stale-release probe. Late subscribers are notified immediately, so boot
+ *  order cannot lose the prompt. Repeated signals update the same state rather
+ *  than scheduling reloads. */
+export const announceUpdateAvailable = (signal: AppUpdateSignal): void => {
+  updateSources.add(signal.source);
+  currentRelease = signal.currentRelease ?? currentRelease;
+  newestRelease = signal.newestRelease ?? newestRelease;
+  const update = updateSnapshot();
+  updateListeners.forEach((listener) => listener(update));
+};
+
+const observeServiceWorkerUpdates = (): void => {
+  if (
+    observingServiceWorker ||
+    typeof navigator === "undefined" ||
+    !("serviceWorker" in navigator)
+  )
     return;
-  let reloaded = false;
-  navigator.serviceWorker.addEventListener("controllerchange", () => {
-    if (reloaded) return;
-    reloaded = true;
-    window.location.reload();
-  });
+  observingServiceWorker = true;
   void navigator.serviceWorker.ready.then((registration) => {
-    if (registration.waiting && navigator.serviceWorker.controller)
-      onAvailable();
+    if (registration.waiting && navigator.serviceWorker.controller) {
+      announceUpdateAvailable({ source: "service-worker" });
+    }
     registration.addEventListener("updatefound", () => {
       const next = registration.installing;
       if (!next) return;
       next.addEventListener("statechange", () => {
         if (next.state === "installed" && navigator.serviceWorker.controller) {
-          onAvailable();
+          announceUpdateAvailable({ source: "service-worker" });
         }
       });
     });
   });
 };
 
-/** Activate the waiting worker; the page reloads automatically once it takes
- *  control. Call from the "reload" action of your update prompt. */
-export const applyUpdate = async () => {
+/** Fire `onAvailable` when a new app version is available from either a waiting
+ *  service worker or announceUpdateAvailable(). The update state is latched, so
+ *  subscribing after detection still displays the prompt. Returns an
+ *  unsubscribe function. Passive detection never reloads the page. */
+export const onUpdateAvailable = (
+  onAvailable: (update: AppUpdate) => void,
+): (() => void) => {
+  updateListeners.add(onAvailable);
+  observeServiceWorkerUpdates();
+  if (updateSources.size > 0) onAvailable(updateSnapshot());
+
+  return () => updateListeners.delete(onAvailable);
+};
+
+/** Ask the current service-worker registration to check for a newer script.
+ *  Safe for focus/visibility polling and a no-op outside a browser. */
+export const checkForUpdate = async (): Promise<void> => {
   if (typeof navigator === "undefined" || !("serviceWorker" in navigator))
     return;
   const registration = await navigator.serviceWorker.getRegistration();
-  registration?.waiting?.postMessage("SKIP_WAITING");
+  await registration?.update();
+};
+
+/** Apply the update after an explicit user action. A waiting worker is asked to
+ *  activate; the page reloads once it takes control, with a bounded hard-reload
+ *  fallback. Release-probe-only updates reload immediately. Concurrent calls
+ *  share one operation, preventing reload loops from repeated clicks/signals. */
+export const applyUpdate = (
+  options: ApplyUpdateOptions = {},
+): Promise<void> => {
+  if (applyingUpdate !== undefined) return applyingUpdate;
+  applyingUpdate = (async () => {
+    if (typeof window === "undefined") return;
+    if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) {
+      window.location.reload();
+      return;
+    }
+
+    const registration = await navigator.serviceWorker.getRegistration();
+    if (!registration?.waiting) {
+      window.location.reload();
+      return;
+    }
+
+    await new Promise<void>((resolve) => {
+      let reloaded = false;
+      const reload = () => {
+        if (reloaded) return;
+        reloaded = true;
+        window.location.reload();
+        resolve();
+      };
+      navigator.serviceWorker.addEventListener("controllerchange", reload, {
+        once: true,
+      });
+      window.setTimeout(
+        reload,
+        Math.max(0, options.activationTimeoutMs ?? 5000),
+      );
+      registration.waiting?.postMessage("SKIP_WAITING");
+    });
+  })();
+
+  return applyingUpdate;
 };

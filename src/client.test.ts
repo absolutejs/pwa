@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
+  announceUpdateAvailable,
+  applyUpdate,
+  checkForUpdate,
   detectEmbeddedBrowser,
+  onUpdateAvailable,
   registerServiceWorker,
+  type AppUpdate,
   type EmbeddedBrowser,
 } from "./client";
 
@@ -123,6 +128,96 @@ describe("registerServiceWorker", () => {
       expect(attempts).toBe(1);
     } finally {
       browser.restore();
+    }
+  });
+});
+
+describe("app update flow", () => {
+  test("latches external signals for late subscribers", () => {
+    announceUpdateAvailable({
+      currentRelease: "old",
+      newestRelease: "new",
+      source: "release-probe",
+    });
+    const updates: AppUpdate[] = [];
+    const unsubscribe = onUpdateAvailable((update) => updates.push(update));
+
+    expect(updates).toEqual([
+      {
+        currentRelease: "old",
+        newestRelease: "new",
+        sources: ["release-probe"],
+      },
+    ]);
+    unsubscribe();
+  });
+
+  test("waits for explicit apply before reloading a service-worker update", async () => {
+    const descriptors = {
+      navigator: Object.getOwnPropertyDescriptor(globalThis, "navigator"),
+      window: Object.getOwnPropertyDescriptor(globalThis, "window"),
+    };
+    const serviceWorker = new EventTarget();
+    const registrationEvents = new EventTarget();
+    let reloads = 0;
+    let updateChecks = 0;
+    let skipWaitingMessages = 0;
+    const registration = {
+      addEventListener:
+        registrationEvents.addEventListener.bind(registrationEvents),
+      installing: null,
+      update: async () => {
+        updateChecks += 1;
+      },
+      waiting: {
+        postMessage: (message: string) => {
+          expect(message).toBe("SKIP_WAITING");
+          skipWaitingMessages += 1;
+          serviceWorker.dispatchEvent(new Event("controllerchange"));
+        },
+      },
+    } as unknown as ServiceWorkerRegistration;
+    Object.defineProperty(serviceWorker, "controller", {
+      value: {},
+    });
+    Object.defineProperty(serviceWorker, "getRegistration", {
+      value: async () => registration,
+    });
+    Object.defineProperty(serviceWorker, "ready", {
+      value: Promise.resolve(registration),
+    });
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: { serviceWorker },
+    });
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        location: { reload: () => (reloads += 1) },
+        setTimeout,
+      },
+    });
+
+    try {
+      const updates: AppUpdate[] = [];
+      const unsubscribe = onUpdateAvailable((update) => updates.push(update));
+      await Promise.resolve();
+      expect(updates.at(-1)?.sources).toContain("service-worker");
+
+      serviceWorker.dispatchEvent(new Event("controllerchange"));
+      expect(reloads).toBe(0);
+
+      await checkForUpdate();
+      expect(updateChecks).toBe(1);
+      await applyUpdate({ activationTimeoutMs: 50 });
+      expect(skipWaitingMessages).toBe(1);
+      expect(reloads).toBe(1);
+      unsubscribe();
+    } finally {
+      for (const [key, descriptor] of Object.entries(descriptors)) {
+        if (descriptor === undefined) Reflect.deleteProperty(globalThis, key);
+        else Object.defineProperty(globalThis, key, descriptor);
+      }
     }
   });
 });

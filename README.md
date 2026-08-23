@@ -145,6 +145,39 @@ Detection is deliberately conservative: Facebook, Instagram, and Messenger are
 identified only from their explicit host-app markers. Unknown WebViews return
 `null`; capability checks remain authoritative.
 
+### App update prompt
+
+One latched update flow handles both waiting service workers and release probes.
+Detection never reloads the page; only the user's update action does:
+
+```ts
+import {
+  announceUpdateAvailable,
+  applyUpdate,
+  checkForUpdate,
+  onUpdateAvailable,
+} from "@absolutejs/pwa/client";
+
+// Render your framework's branded prompt. A signal received before this
+// subscription is retained and delivered immediately.
+const off = onUpdateAvailable(() => showUpdatePrompt());
+
+// Bridge any release detector, including @absolutejs/beacon's releaseProbe:
+const onStale = (release: { currentRelease: string; newestRelease: string }) =>
+  announceUpdateAvailable({ ...release, source: "release-probe" });
+
+// Safe to call on focus, visibility change, or an interval.
+await checkForUpdate();
+
+// Call only from the prompt's button. This activates a waiting worker when one
+// exists, then performs exactly one bounded reload.
+await applyUpdate();
+```
+
+The service worker must be built without `skipWaiting` (the default) so it waits
+for explicit user consent. Repeated release-probe and service-worker signals
+merge into one prompt instead of creating competing reload paths.
+
 Every client function is feature-safe (no-ops when the APIs are missing or during
 SSR). `subscribeToPush` throws `Error("notification-permission-denied")` on a hard
 permission denial so you can message it.
