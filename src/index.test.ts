@@ -9,6 +9,10 @@ describe("pushServiceWorker Sync", () => {
     expect(disabled).not.toContain("ABSOLUTE_SYNC_CONFIGURE");
     expect(enabled).toContain("ABSOLUTE_SYNC_CONFIGURE");
     expect(enabled).toContain("ABSOLUTE_SYNC_RUN");
+    expect(enabled).toContain("ABSOLUTE_SYNC_RESULT");
+    expect(enabled).toContain("durationMs");
+    expect(enabled).toContain("background-sync");
+    expect(enabled).toContain("AbortController");
     expect(enabled).toContain("absolutejs-pwa-sync-config-v1");
     expect(enabled).not.toContain("Bearer ");
   });

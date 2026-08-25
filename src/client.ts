@@ -203,8 +203,26 @@ export const registerServiceWorker = async (
 
 export type PwaSyncConfigurationResult = {
   configured: boolean;
-  reason?: "invalid-principal" | "unauthenticated" | "unsupported";
+  reason?:
+    | "invalid-principal"
+    | "superseded"
+    | "unauthenticated"
+    | "unsupported";
 };
+
+export type PwaSyncTrigger = "background-sync" | "configure" | "lifecycle";
+
+export type PwaSyncRunResult = {
+  acknowledged?: number;
+  deadLettered?: number;
+  durationMs: number;
+  ok: boolean;
+  pulled?: number;
+  retryScheduled?: number;
+  trigger: PwaSyncTrigger;
+};
+
+export const PWA_SYNC_RESULT_EVENT = "absolute:pwa-sync-result";
 
 const DEFAULT_SYNC_ENDPOINT = "/__absolute/sync/background";
 const DEFAULT_PRINCIPAL_ENDPOINT = "/__absolute/sync/principal";
@@ -212,6 +230,90 @@ const DEFAULT_BACKGROUND_TAG = "absolutejs-sync";
 const syncClients = new Set<SyncRuntimeClient>();
 let uninstallSyncTransport: (() => void) | undefined;
 let removeSyncLifecycle: (() => void) | undefined;
+let observedServiceWorker: ServiceWorkerContainer | undefined;
+let lastSyncResult: PwaSyncRunResult | undefined;
+let syncConfigurationGeneration = 0;
+const syncResultListeners = new Set<(result: PwaSyncRunResult) => void>();
+
+const resultCount = (value: unknown) =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : undefined;
+
+const parseSyncResult = (value: unknown): PwaSyncRunResult | undefined => {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Reflect.get(value, "type") !== "ABSOLUTE_SYNC_RESULT"
+  )
+    return undefined;
+  const ok = Reflect.get(value, "ok");
+  const durationMs = resultCount(Reflect.get(value, "durationMs"));
+  const trigger = Reflect.get(value, "trigger");
+  if (
+    typeof ok !== "boolean" ||
+    durationMs === undefined ||
+    (trigger !== "background-sync" &&
+      trigger !== "configure" &&
+      trigger !== "lifecycle")
+  )
+    return undefined;
+
+  return {
+    ...(resultCount(Reflect.get(value, "acknowledged")) === undefined
+      ? {}
+      : { acknowledged: resultCount(Reflect.get(value, "acknowledged")) }),
+    ...(resultCount(Reflect.get(value, "deadLettered")) === undefined
+      ? {}
+      : { deadLettered: resultCount(Reflect.get(value, "deadLettered")) }),
+    durationMs,
+    ok,
+    ...(resultCount(Reflect.get(value, "pulled")) === undefined
+      ? {}
+      : { pulled: resultCount(Reflect.get(value, "pulled")) }),
+    ...(resultCount(Reflect.get(value, "retryScheduled")) === undefined
+      ? {}
+      : { retryScheduled: resultCount(Reflect.get(value, "retryScheduled")) }),
+    trigger,
+  };
+};
+
+const observeSyncResults = () => {
+  if (
+    typeof navigator === "undefined" ||
+    !("serviceWorker" in navigator) ||
+    observedServiceWorker === navigator.serviceWorker ||
+    typeof navigator.serviceWorker.addEventListener !== "function"
+  )
+    return;
+  observedServiceWorker = navigator.serviceWorker;
+  navigator.serviceWorker.addEventListener("message", (event) => {
+    const result = parseSyncResult(event.data);
+    if (!result) return;
+    lastSyncResult = result;
+    syncResultListeners.forEach((listener) => listener(result));
+    if (typeof window !== "undefined" && typeof CustomEvent !== "undefined") {
+      window.dispatchEvent(
+        new CustomEvent(PWA_SYNC_RESULT_EVENT, { detail: result }),
+      );
+    }
+  });
+};
+
+/** Observe sanitized finite Sync outcomes. The latest result is replayed to a
+ * late subscriber. No endpoint, namespace, credentials, rows, or mutation
+ * arguments cross this boundary. */
+export const onPwaSyncResult = (
+  listener: (result: PwaSyncRunResult) => void,
+) => {
+  observeSyncResults();
+  syncResultListeners.add(listener);
+  if (lastSyncResult) listener(lastSyncResult);
+
+  return () => syncResultListeners.delete(listener);
+};
+
+export const getLastPwaSyncResult = () => lastSyncResult;
 
 const exactOriginUrl = (value: string) => {
   const url = new URL(value, window.location.origin);
@@ -252,15 +354,15 @@ const registerBackgroundSync = async (
 const installPwaSyncLifecycle = (
   registration: ServiceWorkerRegistration,
   backgroundTag: string,
+  options: PwaSyncOptions,
 ) => {
   removeSyncLifecycle?.();
+  let refreshing: Promise<PwaSyncConfigurationResult> | undefined;
   const run = () => {
-    postSyncMessage(registration, { type: "ABSOLUTE_SYNC_RUN" });
-    void registerBackgroundSync(registration, backgroundTag);
-    syncClients.forEach((client) => {
-      client.reconnect();
-      void client.flush().catch(() => undefined);
+    refreshing ??= configurePwaSync(options, registration).finally(() => {
+      refreshing = undefined;
     });
+    void refreshing.catch(() => undefined);
   };
   const visible = () => {
     if (document.visibilityState === "visible") run();
@@ -274,6 +376,12 @@ const installPwaSyncLifecycle = (
     document.removeEventListener("visibilitychange", visible);
   };
   return run;
+};
+
+const clearPwaSyncRuntime = (registration: ServiceWorkerRegistration) => {
+  uninstallSyncTransport?.();
+  uninstallSyncTransport = undefined;
+  postSyncMessage(registration, { type: "ABSOLUTE_SYNC_CLEAR" });
 };
 
 /** Provision the shared foreground/worker Sync transport from the active Auth
@@ -291,12 +399,20 @@ export const configurePwaSync = async (
   )
     return { configured: false, reason: "unsupported" };
 
+  const generation = ++syncConfigurationGeneration;
   const registration =
     suppliedRegistration ?? (await navigator.serviceWorker.ready);
+  if (generation !== syncConfigurationGeneration)
+    return { configured: false, reason: "superseded" };
+  observeSyncResults();
   const endpoint = exactOriginUrl(options.endpoint ?? DEFAULT_SYNC_ENDPOINT);
   const principalEndpoint = exactOriginUrl(
     options.principalEndpoint ?? DEFAULT_PRINCIPAL_ENDPOINT,
   );
+  // Fail closed before resolving the current cookie session. A focus/online
+  // wake after an account switch must never run the old namespace with the new
+  // account's credentials.
+  clearPwaSyncRuntime(registration);
   const response = await fetch(principalEndpoint, {
     body: "{}",
     credentials: "include",
@@ -304,17 +420,16 @@ export const configurePwaSync = async (
     method: "POST",
     redirect: "error",
   });
+  if (generation !== syncConfigurationGeneration)
+    return { configured: false, reason: "superseded" };
   if (response.status === 401 || response.status === 403) {
-    uninstallSyncTransport?.();
-    uninstallSyncTransport = undefined;
-    removeSyncLifecycle?.();
-    removeSyncLifecycle = undefined;
-    postSyncMessage(registration, { type: "ABSOLUTE_SYNC_CLEAR" });
     return { configured: false, reason: "unauthenticated" };
   }
   if (!response.ok) return { configured: false, reason: "invalid-principal" };
 
   const principal: unknown = await response.json();
+  if (generation !== syncConfigurationGeneration)
+    return { configured: false, reason: "superseded" };
   const namespace =
     typeof principal === "object" && principal !== null
       ? Reflect.get(principal, "namespace")
@@ -330,6 +445,8 @@ export const configurePwaSync = async (
   const backgroundTag = options.backgroundTag ?? DEFAULT_BACKGROUND_TAG;
   const { createIndexedDbSyncLocalStore, installSyncClientRuntimeTransport } =
     await import("@absolutejs/sync/client");
+  if (generation !== syncConfigurationGeneration)
+    return { configured: false, reason: "superseded" };
   const store = createIndexedDbSyncLocalStore({
     ...(options.databaseName ? { databaseName: options.databaseName } : {}),
   });
@@ -354,8 +471,12 @@ export const configurePwaSync = async (
       version: 1,
     },
   });
-  const run = installPwaSyncLifecycle(registration, backgroundTag);
-  run();
+  installPwaSyncLifecycle(registration, backgroundTag, options);
+  void registerBackgroundSync(registration, backgroundTag);
+  syncClients.forEach((client) => {
+    client.reconnect();
+    void client.flush().catch(() => undefined);
+  });
 
   return { configured: true };
 };

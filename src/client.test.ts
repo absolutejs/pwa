@@ -6,14 +6,19 @@ import {
   checkForUpdate,
   configurePwaSync,
   detectEmbeddedBrowser,
+  getLastPwaSyncResult,
+  onPwaSyncResult,
   onUpdateAvailable,
   registerServiceWorker,
   type AppUpdate,
   type EmbeddedBrowser,
+  type PwaSyncRunResult,
 } from "./client";
 
 describe("PWA Sync provisioning", () => {
-  const installSyncBrowser = (response: Response) => {
+  const installSyncBrowser = (
+    response: Response | (() => Response | Promise<Response>),
+  ) => {
     const descriptors = {
       document: Object.getOwnPropertyDescriptor(globalThis, "document"),
       fetch: Object.getOwnPropertyDescriptor(globalThis, "fetch"),
@@ -49,20 +54,23 @@ describe("PWA Sync provisioning", () => {
       configurable: true,
       value: browserDocument,
     });
+    const serviceWorker = new EventTarget() as EventTarget &
+      Partial<ServiceWorkerContainer>;
+    Object.assign(serviceWorker, {
+      controller: null,
+      ready: Promise.resolve(registration),
+    });
     Object.defineProperty(globalThis, "navigator", {
       configurable: true,
       value: {
-        serviceWorker: {
-          controller: null,
-          ready: Promise.resolve(registration),
-        },
+        serviceWorker,
       },
     });
     Object.defineProperty(globalThis, "fetch", {
       configurable: true,
       value: async (url: string, init: RequestInit) => {
         fetched = { init, url };
-        return response;
+        return typeof response === "function" ? response() : response;
       },
     });
     Object.defineProperty(globalThis, "indexedDB", {
@@ -73,6 +81,8 @@ describe("PWA Sync provisioning", () => {
     return {
       fetched: () => fetched,
       messages,
+      postWorkerResult: (data: unknown) =>
+        serviceWorker.dispatchEvent(new MessageEvent("message", { data })),
       restore: () => {
         for (const [key, descriptor] of Object.entries(descriptors)) {
           if (descriptor === undefined) Reflect.deleteProperty(globalThis, key);
@@ -121,6 +131,111 @@ describe("PWA Sync provisioning", () => {
       });
       expect(browser.messages).toContainEqual({ type: "ABSOLUTE_SYNC_CLEAR" });
     } finally {
+      browser.restore();
+    }
+  });
+
+  test("fails closed before replacing one account namespace with another", async () => {
+    let namespace = "principal-a";
+    const browser = installSyncBrowser(() =>
+      Response.json({ namespace, version: 1 }),
+    );
+    try {
+      expect(await configurePwaSync()).toEqual({ configured: true });
+      namespace = "principal-b";
+      expect(await configurePwaSync()).toEqual({ configured: true });
+      expect(browser.messages).toEqual([
+        { type: "ABSOLUTE_SYNC_CLEAR" },
+        expect.objectContaining({
+          config: expect.objectContaining({ namespace: "principal-a" }),
+          type: "ABSOLUTE_SYNC_CONFIGURE",
+        }),
+        { type: "ABSOLUTE_SYNC_CLEAR" },
+        expect.objectContaining({
+          config: expect.objectContaining({ namespace: "principal-b" }),
+          type: "ABSOLUTE_SYNC_CONFIGURE",
+        }),
+      ]);
+    } finally {
+      browser.restore();
+    }
+  });
+
+  test("lets the newest account refresh win when principal requests finish out of order", async () => {
+    let resolveFirst!: (response: Response) => void;
+    let request = 0;
+    const firstResponse = new Promise<Response>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const browser = installSyncBrowser(() =>
+      request++ === 0
+        ? firstResponse
+        : Response.json({ namespace: "principal-b", version: 1 }),
+    );
+    try {
+      const first = configurePwaSync();
+      await Promise.resolve();
+      const second = configurePwaSync();
+      expect(await second).toEqual({ configured: true });
+      resolveFirst(Response.json({ namespace: "principal-a", version: 1 }));
+      expect(await first).toEqual({ configured: false, reason: "superseded" });
+      expect(browser.messages).toEqual([
+        { type: "ABSOLUTE_SYNC_CLEAR" },
+        { type: "ABSOLUTE_SYNC_CLEAR" },
+        expect.objectContaining({
+          config: expect.objectContaining({ namespace: "principal-b" }),
+          type: "ABSOLUTE_SYNC_CONFIGURE",
+        }),
+      ]);
+    } finally {
+      browser.restore();
+    }
+  });
+
+  test("publishes only validated aggregate Sync timing and result data", async () => {
+    const browser = installSyncBrowser(
+      Response.json({ namespace: "principal-a", version: 1 }),
+    );
+    const results: PwaSyncRunResult[] = [];
+    const unsubscribe = onPwaSyncResult((result) => results.push(result));
+    try {
+      browser.postWorkerResult({
+        acknowledged: 2,
+        args: { secret: true },
+        deadLettered: 0,
+        durationMs: 14,
+        namespace: "principal-a",
+        ok: true,
+        pulled: 3,
+        retryScheduled: 1,
+        token: "secret",
+        trigger: "configure",
+        type: "ABSOLUTE_SYNC_RESULT",
+      });
+      expect(results).toEqual([
+        {
+          acknowledged: 2,
+          deadLettered: 0,
+          durationMs: 14,
+          ok: true,
+          pulled: 3,
+          retryScheduled: 1,
+          trigger: "configure",
+        },
+      ]);
+      expect(getLastPwaSyncResult()).toEqual(results[0]);
+      expect(JSON.stringify(results)).not.toContain("principal-a");
+      expect(JSON.stringify(results)).not.toContain("secret");
+
+      browser.postWorkerResult({
+        durationMs: -1,
+        ok: true,
+        trigger: "configure",
+        type: "ABSOLUTE_SYNC_RESULT",
+      });
+      expect(results).toHaveLength(1);
+    } finally {
+      unsubscribe();
       browser.restore();
     }
   });

@@ -144,8 +144,30 @@ await registerServiceWorker("/sw.js", {
 Both endpoints must resolve to the page's exact origin and redirects are
 refused. Cookies, bearer tokens, mutation arguments, and application rows are
 never embedded in the worker script or service-worker messages. If the session
-is absent, the worker configuration is cleared. `configurePwaSync()` is also
+is absent, the worker configuration is cleared. On focus, online, and visible
+page transitions, the bridge resolves the principal again before syncing. An
+account change aborts the old run, clears its runtime, and installs the new
+opaque namespace before any new work starts. `configurePwaSync()` is also
 exported for hosts that register their worker separately.
+
+Observe sanitized run outcomes without sending application data to AbsoluteJS:
+
+```ts
+import { getLastPwaSyncResult, onPwaSyncResult } from "@absolutejs/pwa/client";
+
+const unsubscribe = onPwaSyncResult((result) => {
+  // { ok, durationMs, trigger, acknowledged?, pulled?, ... }
+  console.log(result);
+});
+
+const latest = getLastPwaSyncResult();
+```
+
+The same aggregate result is dispatched on `window` as the
+`absolute:pwa-sync-result` custom event. Its contract permits only status,
+duration, trigger, and aggregate counts; namespaces, endpoints, credentials,
+mutation arguments, and rows are discarded at the page boundary. This is an
+application-observable signal, not built-in analytics or a phone-home channel.
 
 ### Install prompt
 

@@ -14,6 +14,8 @@ type WorkerSyncConfig = {
   version: 1;
 };
 
+export type PwaSyncTrigger = "background-sync" | "configure" | "lifecycle";
+
 type ExtendableEventLike = Event & {
   waitUntil(promise: Promise<unknown>): void;
 };
@@ -135,11 +137,16 @@ const notifyClients = async (message: unknown) => {
 };
 
 let activeRun: Promise<void> | undefined;
-const runConfiguredSync = () => {
+let activeRunAbort: AbortController | undefined;
+let configReplacement = Promise.resolve();
+const runConfiguredSync = (trigger: PwaSyncTrigger) => {
   if (activeRun) return activeRun;
+  const abort = new AbortController();
+  activeRunAbort = abort;
   activeRun = (async () => {
     const config = await readConfig();
     if (!config) return;
+    const startedAt = performance.now();
     try {
       const result = await runHeadlessSync({
         endpoint: config.endpoint,
@@ -158,33 +165,65 @@ const runConfiguredSync = () => {
             ...init,
             credentials: "include",
             redirect: "error",
+            signal: abort.signal,
           });
         },
       });
       await notifyClients({
         type: "ABSOLUTE_SYNC_RESULT",
         ok: true,
+        durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
+        trigger,
         acknowledged: result.acknowledged,
         deadLettered: result.deadLettered,
         pulled: result.pulled,
         retryScheduled: result.retryScheduled,
       });
     } catch {
-      await notifyClients({ type: "ABSOLUTE_SYNC_RESULT", ok: false });
+      await notifyClients({
+        type: "ABSOLUTE_SYNC_RESULT",
+        ok: false,
+        durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
+        trigger,
+      });
       throw new Error("PWA Sync run failed.");
     }
   })().finally(() => {
     activeRun = undefined;
+    activeRunAbort = undefined;
   });
   return activeRun;
 };
 
+const replaceConfig = async (
+  config: WorkerSyncConfig | undefined,
+  trigger: PwaSyncTrigger,
+) => {
+  activeRunAbort?.abort();
+  await activeRun?.catch(() => undefined);
+  await writeConfig(config);
+  if (config) await runConfiguredSync(trigger);
+};
+
+const scheduleConfigReplacement = (
+  config: WorkerSyncConfig | undefined,
+  trigger: PwaSyncTrigger,
+) => {
+  const replacement = configReplacement.then(() =>
+    replaceConfig(config, trigger),
+  );
+  configReplacement = replacement.catch(() => undefined);
+  return replacement;
+};
+
 worker.addEventListener("sync", ((event: SyncEventLike) => {
   event.waitUntil(
-    readConfig().then((config) =>
-      config && event.tag === config.backgroundTag
-        ? runConfiguredSync()
-        : undefined,
+    configReplacement.then(() =>
+      readConfig().then((config) =>
+        config && event.tag === config.backgroundTag
+          ? runConfiguredSync("background-sync")
+          : undefined,
+      ),
     ),
   );
 }) as never);
@@ -196,12 +235,14 @@ worker.addEventListener("message", ((event: WorkerMessageEvent) => {
     const config = parseConfig(Reflect.get(event.data, "config"));
     event.waitUntil(
       config
-        ? writeConfig(config).then(() => runConfiguredSync())
+        ? scheduleConfigReplacement(config, "configure")
         : Promise.resolve(),
     );
   } else if (type === "ABSOLUTE_SYNC_CLEAR") {
-    event.waitUntil(writeConfig(undefined));
+    event.waitUntil(scheduleConfigReplacement(undefined, "lifecycle"));
   } else if (type === "ABSOLUTE_SYNC_RUN") {
-    event.waitUntil(runConfiguredSync());
+    event.waitUntil(
+      configReplacement.then(() => runConfiguredSync("lifecycle")),
+    );
   }
 }) as never);
