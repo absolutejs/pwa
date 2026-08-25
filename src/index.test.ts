@@ -1,5 +1,18 @@
 import { describe, expect, test } from "bun:test";
-import { parseWebPushSubscription } from "./index";
+import { parseWebPushSubscription, pushServiceWorker } from "./index";
+
+describe("pushServiceWorker Sync", () => {
+  test("bundles the finite runner only when explicitly enabled", () => {
+    const disabled = pushServiceWorker();
+    const enabled = pushServiceWorker({ sync: true });
+
+    expect(disabled).not.toContain("ABSOLUTE_SYNC_CONFIGURE");
+    expect(enabled).toContain("ABSOLUTE_SYNC_CONFIGURE");
+    expect(enabled).toContain("ABSOLUTE_SYNC_RUN");
+    expect(enabled).toContain("absolutejs-pwa-sync-config-v1");
+    expect(enabled).not.toContain("Bearer ");
+  });
+});
 
 describe("parseWebPushSubscription", () => {
   test("normalizes a browser push subscription", () => {

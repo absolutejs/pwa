@@ -4,6 +4,12 @@
 // function is feature-safe — it no-ops when the APIs are missing, so callers
 // needn't guard for unsupported browsers or SSR.
 
+import {
+  createIndexedDbSyncLocalStore,
+  installSyncClientRuntimeTransport,
+  type SyncRuntimeClient,
+} from "@absolutejs/sync/client";
+
 const BASE64_GROUP = 4;
 
 type BeforeInstallPromptEvent = Event & {
@@ -112,6 +118,20 @@ const urlBase64ToUint8Array = (base64: string) => {
   return output;
 };
 
+export type PwaSyncOptions = {
+  /** Finite Sync JSON endpoint. Must resolve to this page's exact origin. */
+  endpoint?: string;
+  /** Auth namespace bootstrap. Must resolve to this page's exact origin. */
+  principalEndpoint?: string;
+  /** Shared IndexedDB name used by foreground clients and the worker. */
+  databaseName?: string;
+  /** Browser Background Sync tag. Default `absolutejs-sync`. */
+  backgroundTag?: string;
+  maxAttempts?: number;
+  maxMutations?: number;
+  maxPulls?: number;
+};
+
 export type ServiceWorkerRegistrationRetryOptions = {
   /** Wait for the document load event before competing for the network. Default
    *  true. */
@@ -122,6 +142,9 @@ export type ServiceWorkerRegistrationRetryOptions = {
   /** Initial retry delay. Later retries use exponential backoff. Default
    *  1000ms. */
   retryDelayMs?: number;
+  /** Provision cookie-authenticated finite Sync after registration. The served
+   *  worker must have been generated with `pushServiceWorker({ sync: true })`. */
+  sync?: false | PwaSyncOptions;
 };
 
 const TRANSIENT_SERVICE_WORKER_ERRORS = new Set([
@@ -157,9 +180,9 @@ export const registerServiceWorker = async (
   const maxAttempts = Math.max(1, Math.trunc(options.maxAttempts ?? 3));
   const retryDelayMs = Math.max(0, options.retryDelayMs ?? 1000);
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    let registration: ServiceWorkerRegistration;
     try {
-      await navigator.serviceWorker.register(path);
-      return;
+      registration = await navigator.serviceWorker.register(path);
     } catch (error) {
       const mayRetry =
         attempt + 1 < maxAttempts &&
@@ -168,8 +191,175 @@ export const registerServiceWorker = async (
       await new Promise((resolve) =>
         setTimeout(resolve, retryDelayMs * 2 ** attempt),
       );
+      continue;
     }
+    if (options.sync !== false && options.sync !== undefined) {
+      try {
+        await configurePwaSync(options.sync, registration);
+      } catch {
+        // PWA Sync provisioning must not turn a valid SW registration into a
+        // page-load failure; explicit configurePwaSync callers can observe it.
+      }
+    }
+    return registration;
   }
+};
+
+export type PwaSyncConfigurationResult = {
+  configured: boolean;
+  reason?: "invalid-principal" | "unauthenticated" | "unsupported";
+};
+
+const DEFAULT_SYNC_ENDPOINT = "/__absolute/sync/background";
+const DEFAULT_PRINCIPAL_ENDPOINT = "/__absolute/sync/principal";
+const DEFAULT_BACKGROUND_TAG = "absolutejs-sync";
+const syncClients = new Set<SyncRuntimeClient>();
+let uninstallSyncTransport: (() => void) | undefined;
+let removeSyncLifecycle: (() => void) | undefined;
+
+const exactOriginUrl = (value: string) => {
+  const url = new URL(value, window.location.origin);
+  if (url.origin !== window.location.origin) {
+    throw new TypeError("PWA Sync endpoints must be exact same-origin URLs.");
+  }
+  return url.href;
+};
+
+const postSyncMessage = (
+  registration: ServiceWorkerRegistration,
+  message: unknown,
+) => {
+  const workers = new Set([
+    registration.active,
+    registration.waiting,
+    registration.installing,
+    navigator.serviceWorker.controller,
+  ]);
+  workers.forEach((worker) => worker?.postMessage(message));
+};
+
+const registerBackgroundSync = async (
+  registration: ServiceWorkerRegistration,
+  tag: string,
+) => {
+  const manager = Reflect.get(registration, "sync");
+  if (typeof manager !== "object" || manager === null) return;
+  const register = Reflect.get(manager, "register");
+  if (typeof register !== "function") return;
+  try {
+    await Reflect.apply(register, manager, [tag]);
+  } catch {
+    // Background Sync is best-effort (permission and browser support vary).
+  }
+};
+
+const installPwaSyncLifecycle = (
+  registration: ServiceWorkerRegistration,
+  backgroundTag: string,
+) => {
+  removeSyncLifecycle?.();
+  const run = () => {
+    postSyncMessage(registration, { type: "ABSOLUTE_SYNC_RUN" });
+    void registerBackgroundSync(registration, backgroundTag);
+    syncClients.forEach((client) => {
+      client.reconnect();
+      void client.flush().catch(() => undefined);
+    });
+  };
+  const visible = () => {
+    if (document.visibilityState === "visible") run();
+  };
+  window.addEventListener("online", run);
+  window.addEventListener("focus", run);
+  document.addEventListener("visibilitychange", visible);
+  removeSyncLifecycle = () => {
+    window.removeEventListener("online", run);
+    window.removeEventListener("focus", run);
+    document.removeEventListener("visibilitychange", visible);
+  };
+  return run;
+};
+
+/** Provision the shared foreground/worker Sync transport from the active Auth
+ * session. The bootstrap returns only an opaque namespace; cookies, tokens,
+ * mutation args, and row data are never sent through service-worker messages. */
+export const configurePwaSync = async (
+  options: PwaSyncOptions = {},
+  suppliedRegistration?: ServiceWorkerRegistration,
+): Promise<PwaSyncConfigurationResult> => {
+  if (
+    typeof window === "undefined" ||
+    typeof document === "undefined" ||
+    typeof navigator === "undefined" ||
+    !("serviceWorker" in navigator)
+  )
+    return { configured: false, reason: "unsupported" };
+
+  const registration =
+    suppliedRegistration ?? (await navigator.serviceWorker.ready);
+  const endpoint = exactOriginUrl(options.endpoint ?? DEFAULT_SYNC_ENDPOINT);
+  const principalEndpoint = exactOriginUrl(
+    options.principalEndpoint ?? DEFAULT_PRINCIPAL_ENDPOINT,
+  );
+  const response = await fetch(principalEndpoint, {
+    body: "{}",
+    credentials: "include",
+    headers: { accept: "application/json", "content-type": "application/json" },
+    method: "POST",
+    redirect: "error",
+  });
+  if (response.status === 401 || response.status === 403) {
+    uninstallSyncTransport?.();
+    uninstallSyncTransport = undefined;
+    removeSyncLifecycle?.();
+    removeSyncLifecycle = undefined;
+    postSyncMessage(registration, { type: "ABSOLUTE_SYNC_CLEAR" });
+    return { configured: false, reason: "unauthenticated" };
+  }
+  if (!response.ok) return { configured: false, reason: "invalid-principal" };
+
+  const principal: unknown = await response.json();
+  const namespace =
+    typeof principal === "object" && principal !== null
+      ? Reflect.get(principal, "namespace")
+      : undefined;
+  if (
+    typeof namespace !== "string" ||
+    namespace.length === 0 ||
+    namespace.length > 256 ||
+    /\s/u.test(namespace)
+  )
+    return { configured: false, reason: "invalid-principal" };
+
+  const backgroundTag = options.backgroundTag ?? DEFAULT_BACKGROUND_TAG;
+  const store = createIndexedDbSyncLocalStore({
+    ...(options.databaseName ? { databaseName: options.databaseName } : {}),
+  });
+  uninstallSyncTransport?.();
+  uninstallSyncTransport = installSyncClientRuntimeTransport({
+    durable: { namespace, store },
+    registerClient: (client) => {
+      syncClients.add(client);
+      return () => syncClients.delete(client);
+    },
+  });
+  postSyncMessage(registration, {
+    type: "ABSOLUTE_SYNC_CONFIGURE",
+    config: {
+      backgroundTag,
+      ...(options.databaseName ? { databaseName: options.databaseName } : {}),
+      endpoint,
+      maxAttempts: options.maxAttempts,
+      maxMutations: options.maxMutations,
+      maxPulls: options.maxPulls,
+      namespace,
+      version: 1,
+    },
+  });
+  const run = installPwaSyncLifecycle(registration, backgroundTag);
+  run();
+
+  return { configured: true };
 };
 
 export type PushStatus = {

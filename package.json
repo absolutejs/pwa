@@ -1,7 +1,7 @@
 {
   "name": "@absolutejs/pwa",
-  "version": "0.8.0",
-  "description": "Framework-agnostic PWA + Web Push primitives — web app manifest, push service worker, VAPID sender, and browser subscription glue",
+  "version": "0.9.0",
+  "description": "Framework-agnostic installability, offline Sync, service workers, and Web Push for AbsoluteJS apps",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/absolutejs/pwa.git"
@@ -25,17 +25,21 @@
     "web-push",
     "push-notifications",
     "service-worker",
+    "offline-sync",
+    "background-sync",
     "manifest",
     "vapid"
   ],
   "scripts": {
-    "build": "rm -rf dist && bun build src/index.ts src/client.ts src/manifest.ts --root ./src --outdir dist --sourcemap --target=bun --external web-push && tsc --project tsconfig.build.json && absolute-manifest emit",
+    "generate:sync-worker": "bun run scripts/generateSyncWorker.ts",
+    "build": "bun run generate:sync-worker && rm -rf dist && bun build src/index.ts src/client.ts src/manifest.ts --root ./src --outdir dist --sourcemap --target=bun --external web-push --external @absolutejs/sync --external @absolutejs/sync/client && tsc --project tsconfig.build.json && absolute-manifest emit",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "format": "prettier --write \"./**/*.{ts,json,md}\"",
     "release": "bun run format && bun run typecheck && bun run build && bun publish"
   },
   "dependencies": {
+    "@absolutejs/sync": "2.24.0",
     "web-push": "^3.6.7",
     "@absolutejs/manifest": "^0.9.0",
     "@sinclair/typebox": "^0.34.0"
@@ -43,6 +47,7 @@
   "devDependencies": {
     "@types/bun": "1.3.14",
     "@types/web-push": "^3.6.4",
+    "fake-indexeddb": "6.2.5",
     "prettier": "3.5.3",
     "typescript": "5.8.3"
   },

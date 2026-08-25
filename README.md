@@ -1,9 +1,9 @@
 # @absolutejs/pwa
 
 Framework-agnostic primitives for turning any app into an installable,
-push-capable PWA: a **web app manifest**, the **push service worker**, a **VAPID
-Web Push sender** that flags dead endpoints, and **browser glue** for
-service-worker registration + subscription.
+offline-capable, push-capable PWA: a **web app manifest**, **finite background
+Sync**, the **push service worker**, a **VAPID Web Push sender** that flags dead
+endpoints, and **browser glue** for service-worker registration + subscription.
 
 It is storage- and framework-agnostic — _you_ decide how subscriptions are
 stored and how routes are mounted. Server helpers live at the root; browser
@@ -41,6 +41,7 @@ export const manifest = createWebAppManifest({
 export const sw = pushServiceWorker({
   icon: ICON,
   offline: { fallback: "/offline.html", assetPrefix: "/assets/" },
+  sync: true,
 });
 
 // VAPID sender — pass empty/unset keys and it no-ops (isConfigured() === false),
@@ -99,6 +100,49 @@ await api.push.subscriptions.delete({ endpoint });
 
 const status = await getPushStatus(); // { supported, permission, subscribed }
 ```
+
+### Offline Sync
+
+`@absolutejs/pwa` can provision `@absolutejs/sync` automatically for an
+authenticated browser app. Generate the worker with `sync: true`, then enable
+the client bridge during registration:
+
+```ts
+await registerServiceWorker("/sw.js", { sync: {} });
+```
+
+With `@absolutejs/auth` and `syncSocket()` mounted, no page-level token or
+collection list is needed. The client performs a strict same-origin JSON `POST`
+to `/__absolute/sync/principal` using the existing HTTP-only session cookie. The
+response contains only an opaque account namespace. Foreground Sync clients and
+the worker share a namespaced IndexedDB store; the worker discovers persisted
+`id`-keyed collection descriptors, flushes the durable outbox, and pulls finite
+updates through `/__absolute/sync/background`.
+
+Background Sync is best-effort because browser support and scheduling vary.
+Online, focus, and visible-page events also reconnect and flush active clients,
+so foreground/resume remains the correctness path. Native apps continue using
+their Bearer-based Auth transport rather than this cookie-session bridge.
+
+Advanced endpoints, limits, and the shared database name are configurable:
+
+```ts
+await registerServiceWorker("/sw.js", {
+  sync: {
+    endpoint: "/__absolute/sync/background",
+    principalEndpoint: "/__absolute/sync/principal",
+    databaseName: "absolutejs-sync-v1",
+    maxMutations: 50,
+    maxPulls: 50,
+  },
+});
+```
+
+Both endpoints must resolve to the page's exact origin and redirects are
+refused. Cookies, bearer tokens, mutation arguments, and application rows are
+never embedded in the worker script or service-worker messages. If the session
+is absent, the worker configuration is cleared. `configurePwaSync()` is also
+exported for hosts that register their worker separately.
 
 ### Install prompt
 

@@ -1,14 +1,144 @@
 import { describe, expect, test } from "bun:test";
+import { indexedDB as fakeIndexedDb } from "fake-indexeddb";
 import {
   announceUpdateAvailable,
   applyUpdate,
   checkForUpdate,
+  configurePwaSync,
   detectEmbeddedBrowser,
   onUpdateAvailable,
   registerServiceWorker,
   type AppUpdate,
   type EmbeddedBrowser,
 } from "./client";
+
+describe("PWA Sync provisioning", () => {
+  const installSyncBrowser = (response: Response) => {
+    const descriptors = {
+      document: Object.getOwnPropertyDescriptor(globalThis, "document"),
+      fetch: Object.getOwnPropertyDescriptor(globalThis, "fetch"),
+      indexedDB: Object.getOwnPropertyDescriptor(globalThis, "indexedDB"),
+      navigator: Object.getOwnPropertyDescriptor(globalThis, "navigator"),
+      window: Object.getOwnPropertyDescriptor(globalThis, "window"),
+    };
+    const messages: unknown[] = [];
+    const tags: string[] = [];
+    const browserWindow = new EventTarget();
+    Object.defineProperty(browserWindow, "location", {
+      value: { origin: "https://app.example" },
+    });
+    const browserDocument = new EventTarget();
+    Object.defineProperty(browserDocument, "visibilityState", {
+      value: "visible",
+    });
+    const worker = {
+      postMessage: (message: unknown) => messages.push(message),
+    };
+    const registration = {
+      active: worker,
+      installing: null,
+      sync: { register: async (tag: string) => tags.push(tag) },
+      waiting: null,
+    } as unknown as ServiceWorkerRegistration;
+    let fetched: { init?: RequestInit; url?: string } = {};
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: browserWindow,
+    });
+    Object.defineProperty(globalThis, "document", {
+      configurable: true,
+      value: browserDocument,
+    });
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        serviceWorker: {
+          controller: null,
+          ready: Promise.resolve(registration),
+        },
+      },
+    });
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      value: async (url: string, init: RequestInit) => {
+        fetched = { init, url };
+        return response;
+      },
+    });
+    Object.defineProperty(globalThis, "indexedDB", {
+      configurable: true,
+      value: fakeIndexedDb,
+    });
+
+    return {
+      fetched: () => fetched,
+      messages,
+      restore: () => {
+        for (const [key, descriptor] of Object.entries(descriptors)) {
+          if (descriptor === undefined) Reflect.deleteProperty(globalThis, key);
+          else Object.defineProperty(globalThis, key, descriptor);
+        }
+      },
+      tags,
+    };
+  };
+
+  test("provisions only an opaque namespace and same-origin finite endpoint", async () => {
+    const browser = installSyncBrowser(
+      Response.json({ namespace: "auth:v1:opaque_namespace", version: 1 }),
+    );
+    try {
+      expect(await configurePwaSync()).toEqual({ configured: true });
+      expect(browser.fetched()).toEqual({
+        init: expect.objectContaining({
+          body: "{}",
+          credentials: "include",
+          method: "POST",
+          redirect: "error",
+        }),
+        url: "https://app.example/__absolute/sync/principal",
+      });
+      expect(browser.tags).toContain("absolutejs-sync");
+      const serialized = JSON.stringify(browser.messages);
+      expect(serialized).toContain("auth:v1:opaque_namespace");
+      expect(serialized).toContain(
+        "https://app.example/__absolute/sync/background",
+      );
+      expect(serialized).not.toContain("cookie");
+      expect(serialized).not.toContain("token");
+      expect(serialized).not.toContain("args");
+    } finally {
+      browser.restore();
+    }
+  });
+
+  test("clears worker configuration when the web session is absent", async () => {
+    const browser = installSyncBrowser(new Response(null, { status: 401 }));
+    try {
+      expect(await configurePwaSync()).toEqual({
+        configured: false,
+        reason: "unauthenticated",
+      });
+      expect(browser.messages).toContainEqual({ type: "ABSOLUTE_SYNC_CLEAR" });
+    } finally {
+      browser.restore();
+    }
+  });
+
+  test("refuses cross-origin endpoints before the principal request", async () => {
+    const browser = installSyncBrowser(
+      Response.json({ namespace: "auth:v1:opaque_namespace", version: 1 }),
+    );
+    try {
+      await expect(
+        configurePwaSync({ endpoint: "https://attacker.example/sync" }),
+      ).rejects.toThrow("exact same-origin");
+      expect(browser.fetched().url).toBeUndefined();
+    } finally {
+      browser.restore();
+    }
+  });
+});
 
 const EMBEDDED_BROWSER_CASES = [
   [

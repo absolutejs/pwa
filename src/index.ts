@@ -6,6 +6,7 @@
 // storage- and framework-agnostic: you decide how subscriptions are stored and
 // how routes are mounted. The browser glue lives in `@absolutejs/pwa/client`.
 import webpush from "web-push";
+import { syncWorkerBlock } from "./generatedSyncWorker";
 
 // ── Web app manifest ────────────────────────────────────────────────────────
 
@@ -126,6 +127,10 @@ export type ServiceWorkerOptions = {
   skipWaiting?: boolean;
   /** Auto-recover a rotated push subscription via `pushsubscriptionchange`. */
   resubscribe?: PushResubscribeConfig;
+  /** Bundle Absolute Sync's finite IndexedDB runner into this worker. The page
+   *  provisions its same-origin endpoint and opaque Auth namespace at runtime;
+   *  neither credentials nor application data are embedded in this script. */
+  sync?: boolean;
 };
 
 const resubscribeBlock = (resubscribe: PushResubscribeConfig): string => `
@@ -233,10 +238,11 @@ export const pushServiceWorker = (
   const resubscribe = options.resubscribe
     ? resubscribeBlock(options.resubscribe)
     : "";
+  const sync = options.sync ? syncWorkerBlock : "";
 
   const installBody = options.skipWaiting ? "self.skipWaiting();" : "";
 
-  return `${offline}${resubscribe}
+  return `${offline}${resubscribe}${sync}
 self.addEventListener('install', function () { ${installBody} });
 self.addEventListener('activate', function (event) {
   event.waitUntil(self.clients.claim());
