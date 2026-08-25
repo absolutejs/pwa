@@ -4,11 +4,7 @@
 // function is feature-safe — it no-ops when the APIs are missing, so callers
 // needn't guard for unsupported browsers or SSR.
 
-import {
-  createIndexedDbSyncLocalStore,
-  installSyncClientRuntimeTransport,
-  type SyncRuntimeClient,
-} from "@absolutejs/sync/client";
+import type { SyncRuntimeClient } from "@absolutejs/sync/client";
 
 const BASE64_GROUP = 4;
 
@@ -332,6 +328,8 @@ export const configurePwaSync = async (
     return { configured: false, reason: "invalid-principal" };
 
   const backgroundTag = options.backgroundTag ?? DEFAULT_BACKGROUND_TAG;
+  const { createIndexedDbSyncLocalStore, installSyncClientRuntimeTransport } =
+    await import("@absolutejs/sync/client");
   const store = createIndexedDbSyncLocalStore({
     ...(options.databaseName ? { databaseName: options.databaseName } : {}),
   });

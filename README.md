@@ -111,6 +111,9 @@ the client bridge during registration:
 await registerServiceWorker("/sw.js", { sync: {} });
 ```
 
+The Sync browser runtime is loaded lazily only when this bridge is enabled, so
+manifest-, install-, and push-only applications do not pay its client cost.
+
 With `@absolutejs/auth` and `syncSocket()` mounted, no page-level token or
 collection list is needed. The client performs a strict same-origin JSON `POST`
 to `/__absolute/sync/principal` using the existing HTTP-only session cookie. The
