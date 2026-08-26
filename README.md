@@ -120,6 +120,15 @@ used by the foreground client and service worker, so IndexedDB upgrades before
 either runtime reads cached rows or flushes the durable outbox. Direct PWA
 integrations may pass that component bundle through `sync.storageSchema`.
 
+The bundle also carries local-data sensitivity, retention, and quota rules.
+Browsers do not receive pretend encryption backed by a key stored beside the
+ciphertext: an encryption-required record fails closed unless the direct PWA
+integration supplies an audited Sync protection provider. Portable packs can
+instead declare `onProtectionUnavailable: "memory-only"`; the feature keeps its
+live browser state without writing sensitive rows to IndexedDB, while the same
+bundle is durably encrypted by the native Keychain/Keystore-backed adapter.
+Quota pressure evicts complete cached projections and never the durable outbox.
+
 With `@absolutejs/auth` and `syncSocket()` mounted, no page-level token or
 collection list is needed. The client performs a strict same-origin JSON `POST`
 to `/__absolute/sync/principal` using the existing HTTP-only session cookie. The
