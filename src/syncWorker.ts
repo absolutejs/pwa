@@ -199,6 +199,8 @@ const runConfiguredSync = (trigger: PwaSyncTrigger) => {
         durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
         trigger,
         acknowledged: result.acknowledged,
+        conflictsDiscarded: result.conflictsDiscarded,
+        conflictsRetried: result.conflictsRetried,
         deadLettered: result.deadLettered,
         pulled: result.pulled,
         retryScheduled: result.retryScheduled,

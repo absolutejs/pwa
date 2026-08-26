@@ -232,6 +232,8 @@ describe("PWA Sync provisioning", () => {
       browser.postWorkerResult({
         acknowledged: 2,
         args: { secret: true },
+        conflictsDiscarded: 4,
+        conflictsRetried: 5,
         deadLettered: 0,
         durationMs: 14,
         namespace: "principal-a",
@@ -245,6 +247,8 @@ describe("PWA Sync provisioning", () => {
       expect(results).toEqual([
         {
           acknowledged: 2,
+          conflictsDiscarded: 4,
+          conflictsRetried: 5,
           deadLettered: 0,
           durationMs: 14,
           ok: true,

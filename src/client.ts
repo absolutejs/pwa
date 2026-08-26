@@ -219,6 +219,8 @@ export type PwaSyncTrigger = "background-sync" | "configure" | "lifecycle";
 
 export type PwaSyncRunResult = {
   acknowledged?: number;
+  conflictsDiscarded?: number;
+  conflictsRetried?: number;
   deadLettered?: number;
   durationMs: number;
   ok: boolean;
@@ -268,6 +270,18 @@ const parseSyncResult = (value: unknown): PwaSyncRunResult | undefined => {
     ...(resultCount(Reflect.get(value, "acknowledged")) === undefined
       ? {}
       : { acknowledged: resultCount(Reflect.get(value, "acknowledged")) }),
+    ...(resultCount(Reflect.get(value, "conflictsDiscarded")) === undefined
+      ? {}
+      : {
+          conflictsDiscarded: resultCount(
+            Reflect.get(value, "conflictsDiscarded"),
+          ),
+        }),
+    ...(resultCount(Reflect.get(value, "conflictsRetried")) === undefined
+      ? {}
+      : {
+          conflictsRetried: resultCount(Reflect.get(value, "conflictsRetried")),
+        }),
     ...(resultCount(Reflect.get(value, "deadLettered")) === undefined
       ? {}
       : { deadLettered: resultCount(Reflect.get(value, "deadLettered")) }),
