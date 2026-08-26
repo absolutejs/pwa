@@ -135,6 +135,36 @@ describe("PWA Sync provisioning", () => {
     }
   });
 
+  test("provisions generated schema metadata to foreground and worker Sync", async () => {
+    const browser = installSyncBrowser(
+      Response.json({ namespace: "principal-a", version: 1 }),
+    );
+    const storageSchema = {
+      components: [
+        { id: "@absolutejs/app", version: 1 },
+        {
+          id: "@absolutejs/tasks-pack",
+          migrations: [{ toVersion: 2 }],
+          version: 2,
+        },
+      ],
+    };
+    try {
+      expect(
+        await configurePwaSync({
+          databaseName: "pwa-schema-forwarding-test",
+          storageSchema,
+        }),
+      ).toEqual({ configured: true });
+      expect(browser.messages).toContainEqual({
+        config: expect.objectContaining({ storageSchema }),
+        type: "ABSOLUTE_SYNC_CONFIGURE",
+      });
+    } finally {
+      browser.restore();
+    }
+  });
+
   test("fails closed before replacing one account namespace with another", async () => {
     let namespace = "principal-a";
     const browser = installSyncBrowser(() =>

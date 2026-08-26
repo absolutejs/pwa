@@ -4,7 +4,10 @@
 // function is feature-safe — it no-ops when the APIs are missing, so callers
 // needn't guard for unsupported browsers or SSR.
 
-import type { SyncRuntimeClient } from "@absolutejs/sync/client";
+import type {
+  SyncLocalStoreSchemaBundle,
+  SyncRuntimeClient,
+} from "@absolutejs/sync/client";
 
 const BASE64_GROUP = 4;
 
@@ -121,6 +124,8 @@ export type PwaSyncOptions = {
   principalEndpoint?: string;
   /** Shared IndexedDB name used by foreground clients and the worker. */
   databaseName?: string;
+  /** Generated app + Sync-pack migration metadata shared with the worker. */
+  storageSchema?: SyncLocalStoreSchemaBundle;
   /** Browser Background Sync tag. Default `absolutejs-sync`. */
   backgroundTag?: string;
   maxAttempts?: number;
@@ -449,6 +454,7 @@ export const configurePwaSync = async (
     return { configured: false, reason: "superseded" };
   const store = createIndexedDbSyncLocalStore({
     ...(options.databaseName ? { databaseName: options.databaseName } : {}),
+    ...(options.storageSchema ? { storageSchema: options.storageSchema } : {}),
   });
   uninstallSyncTransport?.();
   uninstallSyncTransport = installSyncClientRuntimeTransport({
@@ -468,6 +474,9 @@ export const configurePwaSync = async (
       maxMutations: options.maxMutations,
       maxPulls: options.maxPulls,
       namespace,
+      ...(options.storageSchema
+        ? { storageSchema: options.storageSchema }
+        : {}),
       version: 1,
     },
   });

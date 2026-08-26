@@ -114,6 +114,12 @@ await registerServiceWorker("/sw.js", { sync: {} });
 The Sync browser runtime is loaded lazily only when this bridge is enabled, so
 manifest-, install-, and push-only applications do not pay its client cost.
 
+AbsoluteJS supplies `storageSchema` automatically by composing the app schema
+with declarative metadata from installed Sync packs. The same JSON-safe plan is
+used by the foreground client and service worker, so IndexedDB upgrades before
+either runtime reads cached rows or flushes the durable outbox. Direct PWA
+integrations may pass that component bundle through `sync.storageSchema`.
+
 With `@absolutejs/auth` and `syncSocket()` mounted, no page-level token or
 collection list is needed. The client performs a strict same-origin JSON `POST`
 to `/__absolute/sync/principal` using the existing HTTP-only session cookie. The

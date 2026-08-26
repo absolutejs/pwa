@@ -1,7 +1,9 @@
 import {
   createIndexedDbSyncLocalStore,
+  resolveSyncLocalSchemaComponents,
   runHeadlessSync,
 } from "@absolutejs/sync/client";
+import type { SyncLocalStoreSchemaBundle } from "@absolutejs/sync/client";
 
 type WorkerSyncConfig = {
   backgroundTag: string;
@@ -11,6 +13,7 @@ type WorkerSyncConfig = {
   maxMutations?: number;
   maxPulls?: number;
   namespace: string;
+  storageSchema?: SyncLocalStoreSchemaBundle;
   version: 1;
 };
 
@@ -97,6 +100,17 @@ const nonNegativeInteger = (value: unknown) =>
     ? value
     : undefined;
 
+const parseStorageSchema = (
+  value: unknown,
+): SyncLocalStoreSchemaBundle | undefined => {
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null || !("components" in value))
+    throw new TypeError("PWA Sync received invalid storage schema metadata.");
+  const schema = value as SyncLocalStoreSchemaBundle;
+  resolveSyncLocalSchemaComponents({}, schema);
+  return schema;
+};
+
 const parseConfig = (value: unknown): WorkerSyncConfig | undefined => {
   if (typeof value !== "object" || value === null) return undefined;
   const endpoint = sameOriginUrl(Reflect.get(value, "endpoint"));
@@ -114,6 +128,12 @@ const parseConfig = (value: unknown): WorkerSyncConfig | undefined => {
     return undefined;
 
   const databaseName = Reflect.get(value, "databaseName");
+  let storageSchema: SyncLocalStoreSchemaBundle | undefined;
+  try {
+    storageSchema = parseStorageSchema(Reflect.get(value, "storageSchema"));
+  } catch {
+    return undefined;
+  }
   return {
     backgroundTag: backgroundTag ?? DEFAULT_TAG,
     ...(typeof databaseName === "string" && databaseName.length > 0
@@ -124,6 +144,7 @@ const parseConfig = (value: unknown): WorkerSyncConfig | undefined => {
     maxMutations: nonNegativeInteger(Reflect.get(value, "maxMutations")),
     maxPulls: nonNegativeInteger(Reflect.get(value, "maxPulls")),
     namespace,
+    ...(storageSchema ? { storageSchema } : {}),
     version: 1,
   };
 };
@@ -152,6 +173,9 @@ const runConfiguredSync = (trigger: PwaSyncTrigger) => {
         endpoint: config.endpoint,
         store: createIndexedDbSyncLocalStore({
           ...(config.databaseName ? { databaseName: config.databaseName } : {}),
+          ...(config.storageSchema
+            ? { storageSchema: config.storageSchema }
+            : {}),
         }),
         namespace: config.namespace,
         maxAttempts: config.maxAttempts,
