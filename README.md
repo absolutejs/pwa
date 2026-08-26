@@ -125,8 +125,9 @@ Browsers do not receive pretend encryption backed by a key stored beside the
 ciphertext: an encryption-required record fails closed unless the direct PWA
 integration supplies an audited Sync protection provider. Portable packs can
 instead declare `onProtectionUnavailable: "memory-only"`; the feature keeps its
-live browser state without writing sensitive rows to IndexedDB, while the same
-bundle is durably encrypted by the native Keychain/Keystore-backed adapter.
+live browser state and online-only mutations without writing sensitive rows or
+arguments to IndexedDB, while the same bundle is durably encrypted by the
+native Keychain/Keystore-backed adapter.
 Quota pressure evicts complete cached projections and never the durable outbox.
 
 With `@absolutejs/auth` and `syncSocket()` mounted, no page-level token or
