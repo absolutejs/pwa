@@ -1,6 +1,6 @@
 {
   "name": "@absolutejs/pwa",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "description": "Framework-agnostic installability, offline Sync, service workers, and Web Push for AbsoluteJS apps",
   "repository": {
     "type": "git",
@@ -32,13 +32,14 @@
   ],
   "scripts": {
     "generate:sync-worker": "bun run scripts/generateSyncWorker.ts",
-    "build": "bun run generate:sync-worker && rm -rf dist && bun build src/index.ts src/client.ts src/manifest.ts --root ./src --outdir dist --sourcemap --target=bun --external web-push --external @absolutejs/sync --external @absolutejs/sync/client && tsc --project tsconfig.build.json && absolute-manifest emit",
+    "build": "bun run generate:sync-worker && rm -rf dist && bun build src/index.ts src/client.ts src/dispatch.ts src/manifest.ts --root ./src --outdir dist --sourcemap --target=bun --external web-push --external @absolutejs/devices --external '@absolutejs/devices/*' --external @absolutejs/sync --external @absolutejs/sync/client && tsc --project tsconfig.build.json && absolute-manifest emit",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "format": "prettier --write \"./**/*.{ts,json,md}\"",
     "release": "bun run format && bun run typecheck && bun run build && bun publish"
   },
   "dependencies": {
+    "@absolutejs/devices": "^0.6.0",
     "@absolutejs/sync": "2.29.0",
     "web-push": "^3.6.7",
     "@absolutejs/manifest": "^0.9.0",
@@ -61,6 +62,11 @@
       "types": "./dist/client.d.ts",
       "import": "./dist/client.js",
       "default": "./dist/client.js"
+    },
+    "./dispatch": {
+      "types": "./dist/dispatch.d.ts",
+      "import": "./dist/dispatch.js",
+      "default": "./dist/dispatch.js"
     },
     "./manifest": {
       "types": "./dist/manifest.d.ts",

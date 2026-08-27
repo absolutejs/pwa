@@ -16,6 +16,40 @@ describe("pushServiceWorker Sync", () => {
     expect(enabled).toContain("absolutejs-pwa-sync-config-v1");
     expect(enabled).not.toContain("Bearer ");
   });
+
+  test("forwards normalized push events without subscription credentials", () => {
+    const worker = pushServiceWorker();
+
+    expect(worker).toContain("ABSOLUTE_PUSH_RECEIVED");
+    expect(worker).toContain("ABSOLUTE_PUSH_ACTION");
+    expect(worker).toContain("actionLinks");
+    expect(worker).not.toContain("subscription.endpoint");
+    expect(worker).not.toContain("subscription.keys");
+  });
+
+  test("rotates subscriptions through the same-origin trusted Auth contract", () => {
+    const worker = pushServiceWorker({
+      resubscribe: { applicationServerKey: "AQID" },
+    });
+
+    expect(worker).toContain("pushsubscriptionchange");
+    expect(worker).toContain('PWA_SUBSCRIBE_PATH = "/auth/push"');
+    expect(worker).toContain("platform: 'webpush'");
+    expect(worker).toContain("installationId");
+    expect(worker).toContain("self.location.origin");
+    expect(worker).not.toContain("PWA_SUBSCRIBE_URL");
+  });
+
+  test("rejects a cross-origin subscription rotation destination", () => {
+    expect(() =>
+      pushServiceWorker({
+        resubscribe: {
+          applicationServerKey: "AQID",
+          subscribePath: "https://attacker.example/push",
+        },
+      }),
+    ).toThrow("root-relative");
+  });
 });
 
 describe("parseWebPushSubscription", () => {

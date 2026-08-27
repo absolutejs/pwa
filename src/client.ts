@@ -8,6 +8,16 @@ import type {
   SyncLocalStoreSchemaBundle,
   SyncRuntimeClient,
 } from "@absolutejs/sync/client";
+import {
+  DeviceError,
+  type DevicePushNotification,
+  type DevicePushNotificationAction,
+  type DevicePushNotificationsCapability,
+} from "@absolutejs/devices";
+import {
+  getDeviceAdapter,
+  installDeviceAdapter,
+} from "@absolutejs/devices/runtime";
 
 const BASE64_GROUP = 4;
 
@@ -146,6 +156,9 @@ export type ServiceWorkerRegistrationRetryOptions = {
   /** Provision cookie-authenticated finite Sync after registration. The served
    *  worker must have been generated with `pushServiceWorker({ sync: true })`. */
   sync?: false | PwaSyncOptions;
+  /** Install the provider-neutral Devices Web Push capability after the worker
+   *  is registered. Permission remains an explicit application action. */
+  push?: false | PwaPushOptions;
 };
 
 const TRANSIENT_SERVICE_WORKER_ERRORS = new Set([
@@ -200,6 +213,14 @@ export const registerServiceWorker = async (
       } catch {
         // PWA Sync provisioning must not turn a valid SW registration into a
         // page-load failure; explicit configurePwaSync callers can observe it.
+      }
+    }
+    if (options.push !== false && options.push !== undefined) {
+      try {
+        await configurePwaPush(options.push, registration);
+      } catch {
+        // Like Sync, automatic push provisioning cannot break page startup.
+        // Explicit configurePwaPush callers receive typed failures.
       }
     }
     return registration;
@@ -500,6 +521,346 @@ export const configurePwaSync = async (
     client.reconnect();
     void client.flush().catch(() => undefined);
   });
+
+  return { configured: true };
+};
+
+export type PwaPushOptions = {
+  /** Public VAPID application-server key embedded by the AbsoluteJS build. */
+  applicationServerKey: string;
+  /** Authenticated same-origin registration route. Defaults to `/auth/push`. */
+  endpoint?: string;
+};
+
+export type PwaPushConfigurationResult = {
+  configured: boolean;
+  reason?: "unsupported" | "wrong-runtime";
+};
+
+const PUSH_RUNTIME_DATABASE = "absolutejs-pwa-runtime-v1";
+const PUSH_RUNTIME_STORE = "settings";
+const PUSH_INSTALLATION_KEY = "push.installation-id";
+const PUSH_ROUTE = "/auth/push";
+const pushReceivedListeners = new Set<
+  (notification: DevicePushNotification) => void
+>();
+const pushActionListeners = new Set<
+  (action: DevicePushNotificationAction) => void
+>();
+let observedPushServiceWorker: ServiceWorkerContainer | undefined;
+let removePushAdapter: (() => void) | undefined;
+
+const pushPermission = () => {
+  if (!supportsPush())
+    return { canRequest: false, state: "unavailable" as const };
+  if (Notification.permission === "granted")
+    return { canRequest: false, state: "granted" as const };
+  if (Notification.permission === "denied")
+    return { canRequest: false, state: "denied" as const };
+  return { canRequest: true, state: "prompt" as const };
+};
+
+const pushFailure = (error: unknown, message: string) => {
+  if (error instanceof DeviceError) return error;
+  const name =
+    typeof error === "object" && error !== null
+      ? Reflect.get(error, "name")
+      : undefined;
+  return new DeviceError(
+    name === "NotAllowedError" ? "permission-denied" : "failed",
+    message,
+    { cause: error },
+  );
+};
+
+const portableNotification = (
+  value: unknown,
+): DevicePushNotification | undefined => {
+  if (typeof value !== "object" || value === null) return undefined;
+  const id = Reflect.get(value, "id");
+  if (typeof id !== "string" || id.length === 0) return undefined;
+  const data = Reflect.get(value, "data");
+  if (typeof data !== "object" || data === null || Array.isArray(data))
+    return undefined;
+  const stringField = (name: string) => {
+    const field = Reflect.get(value, name);
+    return typeof field === "string" ? field : undefined;
+  };
+
+  return {
+    ...(stringField("body") === undefined ? {} : { body: stringField("body") }),
+    data: data as Record<string, unknown>,
+    id,
+    ...(stringField("subtitle") === undefined
+      ? {}
+      : { subtitle: stringField("subtitle") }),
+    ...(stringField("title") === undefined
+      ? {}
+      : { title: stringField("title") }),
+  };
+};
+
+const observePushEvents = () => {
+  if (
+    typeof navigator === "undefined" ||
+    !("serviceWorker" in navigator) ||
+    observedPushServiceWorker === navigator.serviceWorker
+  )
+    return;
+  observedPushServiceWorker = navigator.serviceWorker;
+  navigator.serviceWorker.addEventListener("message", (event) => {
+    if (typeof event.data !== "object" || event.data === null) return;
+    const type = Reflect.get(event.data, "type");
+    if (type === "ABSOLUTE_PUSH_RECEIVED") {
+      const notification = portableNotification(
+        Reflect.get(event.data, "notification"),
+      );
+      if (notification)
+        pushReceivedListeners.forEach((listener) => listener(notification));
+      return;
+    }
+    if (type !== "ABSOLUTE_PUSH_ACTION") return;
+    const rawAction = Reflect.get(event.data, "action");
+    if (typeof rawAction !== "object" || rawAction === null) return;
+    const actionId = Reflect.get(rawAction, "actionId");
+    const notification = portableNotification(
+      Reflect.get(rawAction, "notification"),
+    );
+    if (typeof actionId !== "string" || !notification) return;
+    pushActionListeners.forEach((listener) =>
+      listener({ actionId, notification }),
+    );
+  });
+};
+
+const pushRuntimeDatabase = () =>
+  new Promise<IDBDatabase>((resolve, reject) => {
+    const request = indexedDB.open(PUSH_RUNTIME_DATABASE, 1);
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains(PUSH_RUNTIME_STORE))
+        request.result.createObjectStore(PUSH_RUNTIME_STORE);
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+
+const pushRuntimeSetting = async (value?: string | null) => {
+  const database = await pushRuntimeDatabase();
+  try {
+    return await new Promise<string | null>((resolve, reject) => {
+      const transaction = database.transaction(
+        PUSH_RUNTIME_STORE,
+        value === undefined ? "readonly" : "readwrite",
+      );
+      const store = transaction.objectStore(PUSH_RUNTIME_STORE);
+      const request =
+        value === undefined
+          ? store.get(PUSH_INSTALLATION_KEY)
+          : value === null
+            ? store.delete(PUSH_INSTALLATION_KEY)
+            : store.put(value, PUSH_INSTALLATION_KEY);
+      request.onsuccess = () =>
+        resolve(
+          value === undefined && typeof request.result === "string"
+            ? request.result
+            : null,
+        );
+      request.onerror = () => reject(request.error);
+    });
+  } finally {
+    database.close();
+  }
+};
+
+const subscriptionBody = (subscription: PushSubscription) => {
+  const json = subscription.toJSON();
+  if (
+    typeof json.endpoint !== "string" ||
+    typeof json.keys?.auth !== "string" ||
+    typeof json.keys.p256dh !== "string"
+  )
+    throw new DeviceError(
+      "failed",
+      "The browser returned an invalid Web Push subscription.",
+    );
+
+  return {
+    endpoint: json.endpoint,
+    keys: { auth: json.keys.auth, p256dh: json.keys.p256dh },
+  };
+};
+
+const ownershipConflict = async (response: Response) => {
+  if (response.status !== 409) return false;
+  const body: unknown = await response
+    .clone()
+    .json()
+    .catch(() => undefined);
+  return (
+    typeof body === "object" &&
+    body !== null &&
+    Reflect.get(body, "code") === "installation-ownership"
+  );
+};
+
+const requirePushResponse = async (response: Response, operation: string) => {
+  if (!response.ok)
+    throw new DeviceError(
+      "failed",
+      `AbsoluteJS Web Push ${operation} failed with HTTP ${response.status}.`,
+    );
+  return response;
+};
+
+const createPwaPushCapability = (
+  options: PwaPushOptions,
+  registration: ServiceWorkerRegistration,
+): DevicePushNotificationsCapability => {
+  const endpoint = exactOriginUrl(options.endpoint ?? PUSH_ROUTE);
+  const register = async (
+    subscription: PushSubscription,
+    installationId?: string | null,
+  ) =>
+    fetch(endpoint, {
+      body: JSON.stringify({
+        ...(installationId ? { installationId } : {}),
+        ...(navigator.language ? { locale: navigator.language } : {}),
+        platform: "webpush",
+        subscription: subscriptionBody(subscription),
+      }),
+      credentials: "include",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+      },
+      method: "POST",
+      redirect: "error",
+    });
+
+  return {
+    capability: async () =>
+      supportsPush()
+        ? { available: true, fidelity: "web" }
+        : {
+            available: false,
+            message: "Web Push is unavailable in this browser context.",
+            reason: "unsupported",
+          },
+    disable: async () => {
+      try {
+        const installationId = await pushRuntimeSetting();
+        if (installationId) {
+          const response = await fetch(endpoint, {
+            body: JSON.stringify({ installationId }),
+            credentials: "include",
+            headers: {
+              accept: "application/json",
+              "content-type": "application/json",
+            },
+            method: "DELETE",
+            redirect: "error",
+          });
+          if (!(await ownershipConflict(response)))
+            await requirePushResponse(response, "removal");
+        }
+        const subscription = await registration.pushManager.getSubscription();
+        await subscription?.unsubscribe();
+        await pushRuntimeSetting(null);
+      } catch (error) {
+        throw pushFailure(error, "Web Push removal failed.");
+      }
+    },
+    enable: async () => {
+      if (pushPermission().state !== "granted")
+        throw new DeviceError(
+          "permission-required",
+          "Notification permission must be granted before enabling Web Push.",
+        );
+      let created = false;
+      let subscription = await registration.pushManager.getSubscription();
+      try {
+        if (!subscription) {
+          subscription = await registration.pushManager.subscribe({
+            applicationServerKey: urlBase64ToUint8Array(
+              options.applicationServerKey,
+            ),
+            userVisibleOnly: true,
+          });
+          created = true;
+        }
+        const currentInstallation = await pushRuntimeSetting();
+        let response = await register(subscription, currentInstallation);
+        if (currentInstallation && (await ownershipConflict(response))) {
+          await pushRuntimeSetting(null);
+          response = await register(subscription);
+        }
+        await requirePushResponse(response, "registration");
+        const result: unknown = await response.json();
+        const installationId =
+          typeof result === "object" && result !== null
+            ? Reflect.get(result, "installationId")
+            : undefined;
+        if (
+          typeof installationId !== "string" ||
+          installationId.length === 0 ||
+          installationId.length > 128
+        )
+          throw new DeviceError(
+            "failed",
+            "Web Push registration returned an invalid installation identity.",
+          );
+        await pushRuntimeSetting(installationId);
+      } catch (error) {
+        if (created) await subscription?.unsubscribe().catch(() => undefined);
+        throw pushFailure(error, "Web Push registration failed.");
+      }
+    },
+    onAction: async (listener) => {
+      observePushEvents();
+      pushActionListeners.add(listener);
+      return () => {
+        pushActionListeners.delete(listener);
+      };
+    },
+    onReceived: async (listener) => {
+      observePushEvents();
+      pushReceivedListeners.add(listener);
+      return () => {
+        pushReceivedListeners.delete(listener);
+      };
+    },
+    queryPermission: async () => pushPermission(),
+    requestPermission: async () => {
+      if (!supportsPush()) return pushPermission();
+      try {
+        await Notification.requestPermission();
+        return pushPermission();
+      } catch (error) {
+        throw pushFailure(error, "Web Push permission request failed.");
+      }
+    },
+  };
+};
+
+/** Install Web Push behind `@absolutejs/devices` for ordinary web pages. The
+ * VAPID key and fixed authenticated endpoint are supplied by the build; page
+ * code never receives a subscription credential. */
+export const configurePwaPush = async (
+  options: PwaPushOptions,
+  suppliedRegistration?: ServiceWorkerRegistration,
+): Promise<PwaPushConfigurationResult> => {
+  if (!supportsPush()) return { configured: false, reason: "unsupported" };
+  const current = getDeviceAdapter();
+  if (current.runtime !== "web")
+    return { configured: false, reason: "wrong-runtime" };
+  const registration =
+    suppliedRegistration ?? (await navigator.serviceWorker.ready);
+  removePushAdapter?.();
+  removePushAdapter = installDeviceAdapter({
+    ...current,
+    pushNotifications: createPwaPushCapability(options, registration),
+  });
+  observePushEvents();
 
   return { configured: true };
 };

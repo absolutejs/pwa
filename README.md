@@ -5,9 +5,9 @@ offline-capable, push-capable PWA: a **web app manifest**, **finite background
 Sync**, the **push service worker**, a **VAPID Web Push sender** that flags dead
 endpoints, and **browser glue** for service-worker registration + subscription.
 
-It is storage- and framework-agnostic — _you_ decide how subscriptions are
-stored and how routes are mounted. Server helpers live at the root; browser
-helpers at `@absolutejs/pwa/client`.
+Its direct primitives remain storage- and framework-agnostic. AbsoluteJS builds
+add the recommended path: Auth owns registration, Dispatch owns lifecycle and
+fanout, and page code uses only `@absolutejs/devices`.
 
 ```bash
 bun add @absolutejs/pwa
@@ -75,6 +75,33 @@ new Elysia()
     return sw;
   });
 ```
+
+## Portable push in AbsoluteJS
+
+In an AbsoluteJS application, importing `pushNotifications` and enabling `pwa`
+automatically generates the browser adapter and subscription-rotation worker.
+Set the public `VAPID_PUBLIC_KEY` in the build environment; keep
+`VAPID_PRIVATE_KEY` only in the trusted delivery process. Configure Auth once
+with a Dispatch lifecycle at `auth({ push: ... })`. The browser can submit only
+its provider credential and opaque installation ID—Auth derives user, tenant,
+and topics on the server.
+
+```ts
+import { pushNotifications } from "@absolutejs/devices";
+
+await pushNotifications.requestPermission();
+await pushNotifications.enable();
+```
+
+The same page code uses APNs/FCM in a Capacitor shell and Web Push in a browser.
+For direct PWA integrations, pass `push` to `registerServiceWorker()` or call
+`configurePwaPush()` explicitly. Installation identity is shared with the
+service worker in IndexedDB so browser subscription rotation updates the same
+trusted server record even when no page is open.
+
+Dispatch users can import `createWebPushDispatchAdapter` from
+`@absolutejs/pwa/dispatch`; it maps provider-neutral messages to the Web Push
+sender and classifies gone/retryable results for lifecycle retirement.
 
 ## Client
 

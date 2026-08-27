@@ -5,6 +5,7 @@ import {
   applyUpdate,
   checkForUpdate,
   configurePwaSync,
+  configurePwaPush,
   detectEmbeddedBrowser,
   getLastPwaSyncResult,
   onPwaSyncResult,
@@ -14,6 +15,209 @@ import {
   type EmbeddedBrowser,
   type PwaSyncRunResult,
 } from "./client";
+import { pushNotifications } from "@absolutejs/devices";
+
+describe("PWA Web Push provisioning", () => {
+  const pushSetting = async (value?: string | null) => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = fakeIndexedDb.open("absolutejs-pwa-runtime-v1", 1);
+      request.onupgradeneeded = () =>
+        request.result.createObjectStore("settings");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    try {
+      return await new Promise<string | null>((resolve, reject) => {
+        const transaction = database.transaction(
+          "settings",
+          value === undefined ? "readonly" : "readwrite",
+        );
+        const store = transaction.objectStore("settings");
+        const request =
+          value === undefined
+            ? store.get("push.installation-id")
+            : value === null
+              ? store.delete("push.installation-id")
+              : store.put(value, "push.installation-id");
+        request.onsuccess = () =>
+          resolve(
+            value === undefined && typeof request.result === "string"
+              ? request.result
+              : null,
+          );
+        request.onerror = () => reject(request.error);
+      });
+    } finally {
+      database.close();
+    }
+  };
+
+  const installPushBrowser = (responses: Response[]) => {
+    const descriptors = {
+      Notification: Object.getOwnPropertyDescriptor(globalThis, "Notification"),
+      fetch: Object.getOwnPropertyDescriptor(globalThis, "fetch"),
+      indexedDB: Object.getOwnPropertyDescriptor(globalThis, "indexedDB"),
+      navigator: Object.getOwnPropertyDescriptor(globalThis, "navigator"),
+      window: Object.getOwnPropertyDescriptor(globalThis, "window"),
+    };
+    const requests: Array<{ body: unknown; method: string; url: string }> = [];
+    let unsubscribed = 0;
+    const subscription = {
+      endpoint: "https://push.example/subscription-1",
+      toJSON: () => ({
+        endpoint: "https://push.example/subscription-1",
+        keys: { auth: "auth-key", p256dh: "p256dh-key" },
+      }),
+      unsubscribe: async () => {
+        unsubscribed += 1;
+        return true;
+      },
+    } as unknown as PushSubscription;
+    const registration = {
+      pushManager: {
+        getSubscription: async () => subscription,
+        subscribe: async () => subscription,
+      },
+    } as unknown as ServiceWorkerRegistration;
+    const serviceWorker = new EventTarget() as EventTarget &
+      Partial<ServiceWorkerContainer>;
+    Object.assign(serviceWorker, { ready: Promise.resolve(registration) });
+    const browserWindow = new EventTarget() as EventTarget &
+      Record<string, unknown>;
+    Object.assign(browserWindow, {
+      Notification: class {},
+      PushManager: class {},
+      atob,
+      location: { origin: "https://app.example" },
+    });
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: browserWindow,
+    });
+    Object.defineProperty(globalThis, "Notification", {
+      configurable: true,
+      value: {
+        permission: "granted",
+        requestPermission: async () => "granted",
+      },
+    });
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: { language: "en-US", serviceWorker },
+    });
+    Object.defineProperty(globalThis, "indexedDB", {
+      configurable: true,
+      value: fakeIndexedDb,
+    });
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      value: async (url: string, init: RequestInit) => {
+        requests.push({
+          body: init.body ? JSON.parse(String(init.body)) : undefined,
+          method: init.method ?? "GET",
+          url,
+        });
+        return responses.shift() ?? new Response(null, { status: 500 });
+      },
+    });
+
+    return {
+      dispatch: (data: unknown) =>
+        serviceWorker.dispatchEvent(new MessageEvent("message", { data })),
+      requests,
+      restore: () => {
+        for (const [key, descriptor] of Object.entries(descriptors)) {
+          if (descriptor === undefined) Reflect.deleteProperty(globalThis, key);
+          else Object.defineProperty(globalThis, key, descriptor);
+        }
+      },
+      unsubscribed: () => unsubscribed,
+    };
+  };
+
+  test("registers through trusted Auth and recovers an account-owned installation", async () => {
+    const browser = installPushBrowser([
+      Response.json({ code: "installation-ownership" }, { status: 409 }),
+      Response.json({ installationId: "web-installation", registered: true }),
+      Response.json({ removed: true }),
+    ]);
+    try {
+      await pushSetting("prior-installation");
+      expect(await configurePwaPush({ applicationServerKey: "AQID" })).toEqual({
+        configured: true,
+      });
+      await pushNotifications.enable();
+      expect(browser.requests.slice(0, 2)).toEqual([
+        {
+          body: {
+            installationId: "prior-installation",
+            locale: "en-US",
+            platform: "webpush",
+            subscription: {
+              endpoint: "https://push.example/subscription-1",
+              keys: { auth: "auth-key", p256dh: "p256dh-key" },
+            },
+          },
+          method: "POST",
+          url: "https://app.example/auth/push",
+        },
+        expect.objectContaining({
+          body: expect.not.objectContaining({
+            installationId: expect.anything(),
+          }),
+        }),
+      ]);
+      expect(JSON.stringify(browser.requests)).not.toContain('"token"');
+      expect(await pushSetting()).toBe("web-installation");
+
+      await pushNotifications.disable();
+      expect(browser.requests.at(-1)).toMatchObject({
+        body: { installationId: "web-installation" },
+        method: "DELETE",
+      });
+      expect(browser.unsubscribed()).toBe(1);
+      expect(await pushSetting()).toBeNull();
+    } finally {
+      browser.restore();
+    }
+  });
+
+  test("forwards credential-free receipt and action events", async () => {
+    const browser = installPushBrowser([]);
+    const received: unknown[] = [];
+    const actions: unknown[] = [];
+    try {
+      await configurePwaPush({ applicationServerKey: "AQID" });
+      const removeReceived = await pushNotifications.onReceived((event) =>
+        received.push(event),
+      );
+      const removeAction = await pushNotifications.onAction((event) =>
+        actions.push(event),
+      );
+      const notification = {
+        body: "Ready",
+        data: { route: "/ready" },
+        id: "push-1",
+        title: "Deployment",
+      };
+      browser.dispatch({
+        notification,
+        type: "ABSOLUTE_PUSH_RECEIVED",
+      });
+      browser.dispatch({
+        action: { actionId: "open", notification },
+        type: "ABSOLUTE_PUSH_ACTION",
+      });
+      expect(received).toEqual([notification]);
+      expect(actions).toEqual([{ actionId: "open", notification }]);
+      expect(JSON.stringify({ actions, received })).not.toContain("endpoint");
+      await removeReceived();
+      await removeAction();
+    } finally {
+      browser.restore();
+    }
+  });
+});
 
 describe("PWA Sync provisioning", () => {
   const installSyncBrowser = (

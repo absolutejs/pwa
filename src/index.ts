@@ -104,14 +104,14 @@ export type OfflineConfig = {
  *  occasionally rotate a push subscription's keys and fire
  *  `pushsubscriptionchange`; without handling it, the old endpoint silently
  *  goes dead and the user stops getting push. With this set, the worker
- *  re-subscribes with the same VAPID key and POSTs the fresh subscription
- *  (`{ endpoint, keys }`, with cookies) back to the server. */
+ *  re-subscribes with the same VAPID key and POSTs the fresh subscription to
+ *  the same-origin trusted Auth route with its opaque installation identity. */
 export type PushResubscribeConfig = {
   /** VAPID public key (base64url) — same one passed to `subscribeToPush`. */
   applicationServerKey: string;
-  /** Same-origin endpoint that persists a subscription (the one the client
-   *  POSTs to on enable). Receives `{ endpoint, keys: { p256dh, auth } }`. */
-  subscribeUrl: string;
+  /** Root-relative Auth route. Cross-origin URLs are rejected before the
+   *  worker is generated. Defaults to `/auth/push`. */
+  subscribePath?: string;
 };
 
 export type ServiceWorkerOptions = {
@@ -133,9 +133,21 @@ export type ServiceWorkerOptions = {
   sync?: boolean;
 };
 
+const requireRootRelativePath = (value: string) => {
+  if (!value.startsWith("/") || value.startsWith("//"))
+    throw new TypeError("Web Push registration must use a root-relative path.");
+  const parsed = new URL(value, "https://absolute.invalid");
+  if (parsed.origin !== "https://absolute.invalid")
+    throw new TypeError("Web Push registration must remain same-origin.");
+  return `${parsed.pathname}${parsed.search}`;
+};
+
 const resubscribeBlock = (resubscribe: PushResubscribeConfig): string => `
 var PWA_VAPID_KEY = ${JSON.stringify(resubscribe.applicationServerKey)};
-var PWA_SUBSCRIBE_URL = ${JSON.stringify(resubscribe.subscribeUrl)};
+var PWA_SUBSCRIBE_PATH = ${JSON.stringify(requireRootRelativePath(resubscribe.subscribePath ?? "/auth/push"))};
+var PWA_RUNTIME_DATABASE = 'absolutejs-pwa-runtime-v1';
+var PWA_RUNTIME_STORE = 'settings';
+var PWA_INSTALLATION_KEY = 'push.installation-id';
 function pwaB64ToUint8(base64) {
   var padding = '='.repeat((4 - base64.length % 4) % 4);
   var b64 = (base64 + padding).replace(/-/g, '+').replace(/_/g, '/');
@@ -143,6 +155,48 @@ function pwaB64ToUint8(base64) {
   var out = new Uint8Array(raw.length);
   for (var i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
   return out;
+}
+function pwaRuntimeSetting(value) {
+  return new Promise(function (resolve, reject) {
+    var request = indexedDB.open(PWA_RUNTIME_DATABASE, 1);
+    request.onupgradeneeded = function () {
+      if (!request.result.objectStoreNames.contains(PWA_RUNTIME_STORE)) request.result.createObjectStore(PWA_RUNTIME_STORE);
+    };
+    request.onerror = function () { reject(request.error); };
+    request.onsuccess = function () {
+      var database = request.result;
+      var transaction = database.transaction(PWA_RUNTIME_STORE, value === undefined ? 'readonly' : 'readwrite');
+      var store = transaction.objectStore(PWA_RUNTIME_STORE);
+      var operation = value === undefined ? store.get(PWA_INSTALLATION_KEY) : value === null ? store.delete(PWA_INSTALLATION_KEY) : store.put(value, PWA_INSTALLATION_KEY);
+      operation.onerror = function () { database.close(); reject(operation.error); };
+      operation.onsuccess = function () {
+        var result = value === undefined && typeof operation.result === 'string' ? operation.result : null;
+        database.close();
+        resolve(result);
+      };
+    };
+  });
+}
+function pwaRegisterSubscription(sub, installationId) {
+  var json = sub.toJSON();
+  var body = { platform: 'webpush', subscription: { endpoint: sub.endpoint, keys: json.keys } };
+  if (installationId) body.installationId = installationId;
+  return fetch(new URL(PWA_SUBSCRIBE_PATH, self.location.origin).href, {
+    method: 'POST',
+    headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+    credentials: 'include',
+    redirect: 'error',
+    body: JSON.stringify(body)
+  }).then(function (response) {
+    if (response.status === 409 && installationId) {
+      return pwaRuntimeSetting(null).then(function () { return pwaRegisterSubscription(sub, null); });
+    }
+    if (!response.ok) throw new Error('Push registration failed with HTTP ' + response.status);
+    return response.json();
+  }).then(function (result) {
+    if (!result || typeof result.installationId !== 'string' || !result.installationId) throw new Error('Push registration returned an invalid installation identity.');
+    return pwaRuntimeSetting(result.installationId);
+  });
 }
 // The browser rotated our subscription → re-subscribe with the same VAPID key
 // and re-register the fresh endpoint so push keeps flowing.
@@ -152,12 +206,8 @@ self.addEventListener('pushsubscriptionchange', function (event) {
       userVisibleOnly: true,
       applicationServerKey: pwaB64ToUint8(PWA_VAPID_KEY)
     }).then(function (sub) {
-      var json = sub.toJSON();
-      return fetch(PWA_SUBSCRIBE_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ endpoint: sub.endpoint, keys: json.keys })
+      return pwaRuntimeSetting().then(function (installationId) {
+        return pwaRegisterSubscription(sub, installationId);
       });
     }).catch(function () {})
   );
@@ -263,36 +313,74 @@ self.addEventListener('push', function (event) {
     else if (self.navigator.clearAppBadge) self.navigator.clearAppBadge();
   }
   var title = data.title || 'Notification';
-  event.waitUntil(self.registration.showNotification(title, {
+  var portable = {
+    id: typeof data.id === 'string' && data.id ? data.id : String(Date.now()),
+    title: title,
+    body: typeof data.body === 'string' ? data.body : '',
+    data: data.data && typeof data.data === 'object' ? data.data : {}
+  };
+  var notifyClients = self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function (list) {
+    list.forEach(function (client) {
+      client.postMessage({ type: 'ABSOLUTE_PUSH_RECEIVED', notification: portable });
+    });
+  });
+  var display = self.registration.showNotification(title, {
     body: data.body || '',
     icon: data.icon || ${JSON.stringify(icon)},
     badge: data.badge || ${JSON.stringify(badge)},
     tag: data.tag,
     actions: Array.isArray(data.actions) ? data.actions : [],
-    data: { url: data.url || '/', actionRequests: data.actionRequests || {} }
-  }));
+    data: {
+      url: data.url || '/',
+      actionLinks: data.actionLinks || {},
+      actionRequests: data.actionRequests || {},
+      portable: portable
+    }
+  });
+  event.waitUntil(Promise.all([display, notifyClients]));
 });
+function pwaSameOriginUrl(value, fallback) {
+  try {
+    var parsed = new URL(value, self.location.origin);
+    return parsed.origin === self.location.origin ? parsed : fallback;
+  } catch (error) {
+    return fallback;
+  }
+}
 self.addEventListener('notificationclick', function (event) {
   var d = event.notification.data || {};
   var reqs = d.actionRequests || {};
+  var links = d.actionLinks || {};
+  var portable = d.portable || { id: String(Date.now()), data: {} };
+  var notifyClients = self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function (list) {
+    list.forEach(function (client) {
+      client.postMessage({
+        type: 'ABSOLUTE_PUSH_ACTION',
+        action: { actionId: event.action || 'tap', notification: portable }
+      });
+    });
+  });
   // An action button with a configured request → fire it (same-origin, with
   // cookies) and dismiss, without opening a tab. The server re-checks the caller.
   if (event.action && reqs[event.action]) {
     var r = reqs[event.action];
     event.notification.close();
-    event.waitUntil(
-      fetch(r.url, {
+    var requestUrl = pwaSameOriginUrl(r.url, null);
+    event.waitUntil(Promise.all([
+      notifyClients,
+      requestUrl ? fetch(requestUrl.href, {
         method: r.method || 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify(r.body || {})
-      }).catch(function () {})
-    );
+      }).catch(function () {}) : Promise.resolve()
+    ]));
     return;
   }
   event.notification.close();
-  var target = d.url || '/';
-  event.waitUntil(
+  var targetUrl = pwaSameOriginUrl((event.action && links[event.action]) || d.url || '/', new URL('/', self.location.origin));
+  var target = targetUrl.pathname + targetUrl.search + targetUrl.hash;
+  event.waitUntil(Promise.all([notifyClients,
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function (list) {
       for (var i = 0; i < list.length; i++) {
         var client = list[i];
@@ -300,7 +388,7 @@ self.addEventListener('notificationclick', function (event) {
       }
       if (self.clients.openWindow) return self.clients.openWindow(target);
     })
-  );
+  ]));
 });
 `.trim();
 };
@@ -357,8 +445,12 @@ export type WebPushActionRequest = {
 };
 
 export type WebPushPayload = {
+  /** Stable receipt identity forwarded to open clients; never a subscription credential. */
+  id: string;
   title: string;
   body: string;
+  /** Provider-neutral application data forwarded to receipt listeners. */
+  data?: Record<string, unknown>;
   url?: string;
   tag?: string;
   icon?: string;
@@ -368,6 +460,8 @@ export type WebPushPayload = {
   /** Per-action request the SW fires on tap (action id → request). When an
    *  action has a request, the SW fetches it instead of opening `url`. */
   actionRequests?: Record<string, WebPushActionRequest>;
+  /** Per-action application route opened when no authenticated request is configured. */
+  actionLinks?: Record<string, string>;
   /** Unread/pending count to show on the app icon badge (0 clears it). The SW
    *  applies it on receipt, so the badge updates even with no window open. */
   badgeCount?: number;
