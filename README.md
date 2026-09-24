@@ -297,3 +297,15 @@ permission denial so you can message it.
 ## License
 
 MIT
+
+### Long-lived tab updates
+
+Subscribe with `onUpdateAvailable` before calling `startAppUpdateChecks({
+currentRelease, endpoint: "/version" })` from `@absolutejs/pwa/client`. Serve a
+non-cached `{ release }` or `{ commit }` response and embed the same release in
+each rendered page. The package checks immediately, once a minute while visible,
+and on focus, visibility and reconnect. Return the cleanup on unmount. The probe
+works even without service workers, ignores offline/malformed responses, and
+never reloads automatically. Render your app's persistent Update now button and
+call `applyUpdate()` only from that user action. A waiting worker activates first;
+otherwise it performs one reload. Failed activation lookups can be retried.

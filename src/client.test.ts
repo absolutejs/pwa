@@ -704,3 +704,95 @@ describe("app update flow", () => {
     }
   });
 });
+
+describe("long-lived tab update checks", () => {
+  test("probes releases on reconnect, tolerates offline/invalid responses, latches once and cleans up", async () => {
+    const { startAppUpdateChecks } = await import("./client");
+    const originals = ["window", "document", "navigator"].map(
+      (key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const,
+    );
+    let tick = () => {};
+    let requests = 0;
+    let cleared = false;
+    let value: unknown = { release: "a" };
+    let offline = false;
+    const win = Object.assign(new EventTarget(), {
+      location: { href: "https://example.com/", origin: "https://example.com" },
+      fetch: async (_url: string, options: RequestInit) => {
+        requests++;
+        expect(options.cache).toBe("no-store");
+        if (offline) throw Error("offline");
+        return Response.json(value);
+      },
+      setTimeout,
+      clearTimeout,
+      setInterval: (callback: () => void) => {
+        tick = callback;
+        return 1;
+      },
+      clearInterval: () => {
+        cleared = true;
+      },
+    });
+    const doc = Object.assign(new EventTarget(), {
+      visibilityState: "visible",
+    });
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: win,
+    });
+    Object.defineProperty(globalThis, "document", {
+      configurable: true,
+      value: doc,
+    });
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {},
+    });
+    const updates: AppUpdate[] = [];
+    const unsubscribe = onUpdateAvailable((update) => updates.push(update));
+    updates.length = 0;
+    const stop = startAppUpdateChecks({ currentRelease: "a" });
+    try {
+      await Bun.sleep(5);
+      expect(updates).toHaveLength(0);
+      offline = true;
+      win.dispatchEvent(new Event("online"));
+      await Bun.sleep(5);
+      expect(updates).toHaveLength(0);
+      offline = false;
+      value = { release: null };
+      tick();
+      await Bun.sleep(5);
+      expect(updates).toHaveLength(0);
+      value = { commit: "b" };
+      doc.visibilityState = "hidden";
+      tick();
+      await Bun.sleep(5);
+      expect(updates).toHaveLength(0);
+      doc.visibilityState = "visible";
+      doc.dispatchEvent(new Event("visibilitychange"));
+      await Bun.sleep(5);
+      expect(updates).toHaveLength(1);
+      expect(updates[0]?.newestRelease).toBe("b");
+      tick();
+      win.dispatchEvent(new Event("focus"));
+      await Bun.sleep(5);
+      expect(updates).toHaveLength(1);
+      stop();
+      const previous = requests;
+      win.dispatchEvent(new Event("online"));
+      tick();
+      await Bun.sleep(5);
+      expect(requests).toBe(previous);
+      expect(cleared).toBe(true);
+    } finally {
+      stop();
+      unsubscribe();
+      for (const [key, descriptor] of originals) {
+        if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+        else Reflect.deleteProperty(globalThis, key);
+      }
+    }
+  });
+});

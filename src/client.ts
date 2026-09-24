@@ -1132,5 +1132,113 @@ export const applyUpdate = (
     });
   })();
 
+  // A denied registration lookup must not permanently poison future clicks.
+  applyingUpdate = applyingUpdate.catch((error) => {
+    applyingUpdate = undefined;
+    throw error;
+  });
   return applyingUpdate;
+};
+
+export type AppUpdateCheckOptions = {
+  /** Release embedded in this page. Omit to check only service workers. */
+  currentRelease?: string;
+  /** Same-origin JSON endpoint returning { release } or { commit }. Default /version. */
+  endpoint?: string;
+  /** Visible-tab polling interval; default 60000ms, minimum 1000ms. */
+  intervalMs?: number;
+};
+
+/** Keep open tabs informed without reloading them. Check immediately, every
+ * visible minute, and on focus/visibility/reconnect. Release probes also work
+ * without service workers. Offline/malformed responses leave the current page
+ * usable; cleanup aborts in-flight probes and removes all polling listeners. */
+export const startAppUpdateChecks = (
+  options: AppUpdateCheckOptions = {},
+): (() => void) => {
+  if (typeof window === "undefined" || typeof document === "undefined")
+    return () => {};
+  let endpoint: URL | undefined;
+  if (options.currentRelease) {
+    try {
+      const candidate = new URL(
+        options.endpoint ?? "/version",
+        window.location.href,
+      );
+      if (candidate.origin === window.location.origin) endpoint = candidate;
+    } catch {
+      /* Invalid optional probe must not break the app. */
+    }
+  }
+  let stopped = false;
+  let checking = false;
+  let reported = false;
+  let controller: AbortController | undefined;
+  const checkRelease = async () => {
+    if (!endpoint || checking || reported || stopped) return;
+    checking = true;
+    controller = new AbortController();
+    const timeout = window.setTimeout(() => controller?.abort(), 10000);
+    try {
+      const response = await window.fetch(endpoint.href, {
+        cache: "no-store",
+        credentials: "same-origin",
+        signal: controller.signal,
+      });
+      if (!response.ok) return;
+      const body: unknown = await response.json();
+      if (!body || typeof body !== "object") return;
+      const release =
+        "commit" in body && typeof body.commit === "string"
+          ? body.commit
+          : "release" in body && typeof body.release === "string"
+            ? body.release
+            : undefined;
+      if (!release || release === options.currentRelease || stopped) return;
+      reported = true;
+      announceUpdateAvailable({
+        source: "release-probe",
+        currentRelease: options.currentRelease,
+        newestRelease: release,
+      });
+    } catch {
+      /* Retry on the next tick or reconnect. */
+    } finally {
+      window.clearTimeout(timeout);
+      controller = undefined;
+      checking = false;
+    }
+  };
+  let checkingWorker = false;
+  const check = () => {
+    if (stopped) return;
+    void checkRelease();
+    if (!checkingWorker) {
+      checkingWorker = true;
+      void checkForUpdate()
+        .catch(() => {})
+        .finally(() => {
+          checkingWorker = false;
+        });
+    }
+  };
+  const whenVisible = () => {
+    if (document.visibilityState === "visible") check();
+  };
+  const interval = window.setInterval(
+    whenVisible,
+    Math.max(1000, options.intervalMs ?? 60000),
+  );
+  window.addEventListener("focus", whenVisible);
+  window.addEventListener("online", whenVisible);
+  document.addEventListener("visibilitychange", whenVisible);
+  check();
+  return () => {
+    stopped = true;
+    controller?.abort();
+    window.clearInterval(interval);
+    window.removeEventListener("focus", whenVisible);
+    window.removeEventListener("online", whenVisible);
+    document.removeEventListener("visibilitychange", whenVisible);
+  };
 };
