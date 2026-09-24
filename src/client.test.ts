@@ -796,3 +796,39 @@ describe("long-lived tab update checks", () => {
     }
   });
 });
+
+test("a denied update lookup can be retried without duplicate reloads", async () => {
+  const specifier = "./client.ts?retry-update-test";
+  const { applyUpdate: applyFreshUpdate } = await import(specifier);
+  const originals = ["window", "navigator"].map(
+    (key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const,
+  );
+  let attempts = 0,
+    reloads = 0;
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { location: { reload: () => reloads++ } },
+  });
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: {
+      serviceWorker: {
+        getRegistration: async () => {
+          if (++attempts === 1) throw Error("temporarily denied");
+          return undefined;
+        },
+      },
+    },
+  });
+  try {
+    await expect(applyFreshUpdate()).rejects.toThrow("temporarily denied");
+    await Promise.all([applyFreshUpdate(), applyFreshUpdate()]);
+    expect(attempts).toBe(2);
+    expect(reloads).toBe(1);
+  } finally {
+    for (const [key, descriptor] of originals) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else Reflect.deleteProperty(globalThis, key);
+    }
+  }
+});
