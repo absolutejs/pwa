@@ -1242,3 +1242,115 @@ export const startAppUpdateChecks = (
     document.removeEventListener("visibilitychange", whenVisible);
   };
 };
+
+export type AutoUpdateOptions = {
+  /** Quiet period (no pointer, key, wheel, touch or scroll input) a visible tab
+   *  must reach before updating. Default 15000ms. */
+  idleMs?: number;
+  /** How often to re-check once an update is waiting but the page is busy.
+   *  Default 5000ms. */
+  retryMs?: number;
+  /** App-specific veto, e.g. unsaved drafts. Return true to postpone. */
+  isBusy?: () => boolean;
+  /** Called once, just before the page reloads into the new release. */
+  onApply?: () => void;
+  applyOptions?: ApplyUpdateOptions;
+};
+
+const editableSelector =
+  'input:not([type="button"]):not([type="submit"]):not([type="reset"]):not([type="checkbox"]):not([type="radio"]), textarea, select, [contenteditable=""], [contenteditable="true"]';
+
+/** Built-in "don't reload now" signals: an open dialog/modal, or focus in a
+ *  field where someone may be typing. */
+export const pageLooksBusy = (): boolean => {
+  if (typeof document === "undefined") return false;
+  const doc = document as Partial<Document>;
+  if (
+    typeof doc.querySelector === "function" &&
+    doc.querySelector('dialog[open], [role="dialog"], [aria-modal="true"]')
+  )
+    return true;
+  const active = doc.activeElement as Element | null | undefined;
+  return (
+    typeof active?.matches === "function" && active.matches(editableSelector)
+  );
+};
+
+const interactionEvents = [
+  "pointerdown",
+  "keydown",
+  "wheel",
+  "touchstart",
+  "scroll",
+  "input",
+] as const;
+
+/** Apply app updates without asking, at a moment that cannot lose work: at once
+ *  in a hidden tab, or after `idleMs` without input in a visible one, and never
+ *  while a dialog is open, a field has focus or `isBusy()` returns true. Pairs
+ *  with startAppUpdateChecks() for discovery; a banner from onUpdateAvailable()
+ *  remains useful while the page is busy. Returns a stop function. */
+export const startAutoUpdate = (
+  options: AutoUpdateOptions = {},
+): (() => void) => {
+  if (typeof window === "undefined" || typeof document === "undefined")
+    return () => {};
+  const idleMs = Math.max(0, options.idleMs ?? 15000);
+  const retryMs = Math.max(10, options.retryMs ?? 5000);
+  let pending = false;
+  let stopped = false;
+  let applied = false;
+  let lastInteraction = Date.now();
+  let timer: number | undefined;
+
+  const busy = () => {
+    try {
+      return pageLooksBusy() || options.isBusy?.() === true;
+    } catch {
+      return true; // An app check that fails never forces a reload.
+    }
+  };
+  const schedule = (delay: number) => {
+    if (timer !== undefined) window.clearTimeout(timer);
+    timer = window.setTimeout(evaluate, Math.max(0, delay));
+  };
+  function evaluate() {
+    timer = undefined;
+    if (!pending || stopped || applied) return;
+    const hidden = document.visibilityState === "hidden";
+    const quietFor = Date.now() - lastInteraction;
+    if (!hidden && quietFor < idleMs) return schedule(idleMs - quietFor);
+    if (busy()) return schedule(retryMs);
+    applied = true;
+    options.onApply?.();
+    void applyUpdate(options.applyOptions).catch(() => {
+      applied = false; // Transient failure: try again on the next quiet moment.
+      schedule(retryMs);
+    });
+  }
+  const interacted = () => {
+    lastInteraction = Date.now();
+    if (pending && document.visibilityState !== "hidden") schedule(idleMs);
+  };
+  const visibility = () => {
+    if (pending) schedule(0);
+  };
+  for (const event of interactionEvents)
+    window.addEventListener(event, interacted, {
+      capture: true,
+      passive: true,
+    });
+  document.addEventListener("visibilitychange", visibility);
+  const unsubscribe = onUpdateAvailable(() => {
+    pending = true;
+    schedule(0);
+  });
+  return () => {
+    stopped = true;
+    unsubscribe();
+    if (timer !== undefined) window.clearTimeout(timer);
+    for (const event of interactionEvents)
+      window.removeEventListener(event, interacted, { capture: true });
+    document.removeEventListener("visibilitychange", visibility);
+  };
+};

@@ -832,3 +832,153 @@ test("a denied update lookup can be retried without duplicate reloads", async ()
     }
   }
 });
+
+describe("automatic updates at a safe moment", () => {
+  let freshModule = 0;
+  const installPage = () => {
+    const originals = ["window", "document", "navigator"].map(
+      (key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const,
+    );
+    const state = {
+      reloads: 0,
+      dialogOpen: false,
+      focused: null as null | { matches: (selector: string) => boolean },
+    };
+    const win = Object.assign(new EventTarget(), {
+      location: {
+        href: "https://example.com/tasks?task=1",
+        origin: "https://example.com",
+        reload: () => {
+          state.reloads++;
+        },
+      },
+      setTimeout,
+      clearTimeout,
+      setInterval,
+      clearInterval,
+    });
+    const doc = Object.assign(new EventTarget(), {
+      visibilityState: "visible" as "visible" | "hidden",
+      querySelector: () => (state.dialogOpen ? {} : null),
+      get activeElement() {
+        return state.focused;
+      },
+    });
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: win,
+    });
+    Object.defineProperty(globalThis, "document", {
+      configurable: true,
+      value: doc,
+    });
+    // No service worker: applyUpdate falls back to a plain reload.
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {},
+    });
+    const restore = () => {
+      for (const [key, descriptor] of originals) {
+        if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+        else Reflect.deleteProperty(globalThis, key);
+      }
+    };
+    return { win, doc, state, restore };
+  };
+  const load = async () =>
+    (await import(
+      `./client.ts?auto-update-${++freshModule}`
+    )) as typeof import("./client");
+  const announce = (client: typeof import("./client")) =>
+    client.announceUpdateAvailable({
+      source: "release-probe",
+      newestRelease: "b",
+    });
+
+  test("a hidden tab updates as soon as the new release is known", async () => {
+    const page = installPage();
+    const client = await load();
+    page.doc.visibilityState = "hidden";
+    const stop = client.startAutoUpdate({ idleMs: 60_000 });
+    try {
+      await Bun.sleep(5);
+      expect(page.state.reloads).toBe(0);
+      announce(client);
+      await Bun.sleep(20);
+      expect(page.state.reloads).toBe(1);
+    } finally {
+      stop();
+      page.restore();
+    }
+  });
+
+  test("a visible tab waits for a quiet period, and new input restarts it", async () => {
+    const page = installPage();
+    const client = await load();
+    const stop = client.startAutoUpdate({ idleMs: 80 });
+    try {
+      announce(client);
+      await Bun.sleep(50);
+      page.win.dispatchEvent(new Event("keydown"));
+      await Bun.sleep(50);
+      expect(page.state.reloads).toBe(0);
+      await Bun.sleep(80);
+      expect(page.state.reloads).toBe(1);
+    } finally {
+      stop();
+      page.restore();
+    }
+  });
+
+  test("open dialogs, focused fields and the app's own veto postpone the update", async () => {
+    const page = installPage();
+    const client = await load();
+    let unsaved = true;
+    let crashing = false;
+    const stop = client.startAutoUpdate({
+      idleMs: 0,
+      retryMs: 20,
+      isBusy: () => {
+        if (crashing) throw Error("check failed");
+        return unsaved;
+      },
+    });
+    try {
+      page.state.dialogOpen = true;
+      announce(client);
+      await Bun.sleep(40);
+      expect(page.state.reloads).toBe(0);
+      page.state.dialogOpen = false;
+      page.state.focused = { matches: () => true };
+      await Bun.sleep(40);
+      expect(page.state.reloads).toBe(0);
+      page.state.focused = null;
+      await Bun.sleep(40);
+      expect(page.state.reloads).toBe(0); // isBusy() still true
+      unsaved = false;
+      crashing = true;
+      await Bun.sleep(40);
+      expect(page.state.reloads).toBe(0); // a failing check never forces a reload
+      crashing = false;
+      await Bun.sleep(40);
+      expect(page.state.reloads).toBe(1);
+    } finally {
+      stop();
+      page.restore();
+    }
+  });
+
+  test("stopping cancels a pending automatic update", async () => {
+    const page = installPage();
+    const client = await load();
+    const stop = client.startAutoUpdate({ idleMs: 40 });
+    announce(client);
+    stop();
+    try {
+      await Bun.sleep(80);
+      expect(page.state.reloads).toBe(0);
+    } finally {
+      page.restore();
+    }
+  });
+});
