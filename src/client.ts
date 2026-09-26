@@ -1026,6 +1026,10 @@ let currentRelease: string | undefined;
 let newestRelease: string | undefined;
 let observingServiceWorker = false;
 let applyingUpdate: Promise<void> | undefined;
+// Set by startAppUpdateChecks({ currentRelease }): the release this page runs and
+// a way to ask the server for the newest one.
+let pageRelease: string | undefined;
+let probeRelease: (() => Promise<string | undefined>) | undefined;
 
 const updateSnapshot = (): AppUpdate => ({
   ...(currentRelease === undefined ? {} : { currentRelease }),
@@ -1045,6 +1049,20 @@ export const announceUpdateAvailable = (signal: AppUpdateSignal): void => {
   updateListeners.forEach((listener) => listener(update));
 };
 
+// A new worker isn't always a new app. When the server's newest release is the
+// one this page already runs (the page loaded fresh during a deploy), let the
+// worker take over quietly: no prompt, no reload. Otherwise it's a real update.
+const settleWaitingWorker = async (registration: ServiceWorkerRegistration) => {
+  if (pageRelease !== undefined && probeRelease !== undefined) {
+    const newest = await probeRelease().catch(() => undefined);
+    if (newest === pageRelease) {
+      registration.waiting?.postMessage("SKIP_WAITING");
+      return;
+    }
+  }
+  announceUpdateAvailable({ source: "service-worker" });
+};
+
 const observeServiceWorkerUpdates = (): void => {
   if (
     observingServiceWorker ||
@@ -1055,14 +1073,14 @@ const observeServiceWorkerUpdates = (): void => {
   observingServiceWorker = true;
   void navigator.serviceWorker.ready.then((registration) => {
     if (registration.waiting && navigator.serviceWorker.controller) {
-      announceUpdateAvailable({ source: "service-worker" });
+      void settleWaitingWorker(registration);
     }
     registration.addEventListener("updatefound", () => {
       const next = registration.installing;
       if (!next) return;
       next.addEventListener("statechange", () => {
         if (next.state === "installed" && navigator.serviceWorker.controller) {
-          announceUpdateAvailable({ source: "service-worker" });
+          void settleWaitingWorker(registration);
         }
       });
     });
@@ -1174,26 +1192,33 @@ export const startAppUpdateChecks = (
   let checking = false;
   let reported = false;
   let controller: AbortController | undefined;
+  const fetchRelease = async (signal?: AbortSignal) => {
+    if (!endpoint) return undefined;
+    const response = await window.fetch(endpoint.href, {
+      cache: "no-store",
+      credentials: "same-origin",
+      signal,
+    });
+    if (!response.ok) return undefined;
+    const body: unknown = await response.json();
+    if (!body || typeof body !== "object") return undefined;
+    return "commit" in body && typeof body.commit === "string"
+      ? body.commit
+      : "release" in body && typeof body.release === "string"
+        ? body.release
+        : undefined;
+  };
+  if (endpoint && options.currentRelease) {
+    pageRelease = options.currentRelease;
+    probeRelease = () => fetchRelease();
+  }
   const checkRelease = async () => {
     if (!endpoint || checking || reported || stopped) return;
     checking = true;
     controller = new AbortController();
     const timeout = window.setTimeout(() => controller?.abort(), 10000);
     try {
-      const response = await window.fetch(endpoint.href, {
-        cache: "no-store",
-        credentials: "same-origin",
-        signal: controller.signal,
-      });
-      if (!response.ok) return;
-      const body: unknown = await response.json();
-      if (!body || typeof body !== "object") return;
-      const release =
-        "commit" in body && typeof body.commit === "string"
-          ? body.commit
-          : "release" in body && typeof body.release === "string"
-            ? body.release
-            : undefined;
+      const release = await fetchRelease(controller.signal);
       if (!release || release === options.currentRelease || stopped) return;
       reported = true;
       announceUpdateAvailable({
@@ -1235,6 +1260,10 @@ export const startAppUpdateChecks = (
   check();
   return () => {
     stopped = true;
+    if (probeRelease !== undefined && pageRelease === options.currentRelease) {
+      pageRelease = undefined;
+      probeRelease = undefined;
+    }
     controller?.abort();
     window.clearInterval(interval);
     window.removeEventListener("focus", whenVisible);
