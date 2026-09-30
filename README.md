@@ -309,3 +309,29 @@ works even without service workers, ignores offline/malformed responses, and
 never reloads automatically. Render your app's persistent Update now button and
 call `applyUpdate()` only from that user action. A waiting worker activates first;
 otherwise it performs one reload. Failed activation lookups can be retried.
+
+### Automatic updates
+
+`startAutoUpdate()` applies a discovered update on its own, at a moment that
+cannot lose work: immediately in a hidden tab, or after `idleMs` (default 15s)
+without pointer, key, wheel, touch or scroll input in a visible one. It never
+reloads while a `dialog[open]`, `[role="dialog"]` or `[aria-modal="true"]`
+element is present, while a text field has focus, or while your `isBusy()`
+returns true (a throwing check counts as busy); it re-checks every `retryMs`.
+
+```ts
+import {
+  onUpdateAvailable,
+  startAppUpdateChecks,
+  startAutoUpdate,
+} from "@absolutejs/pwa/client";
+
+const offPrompt = onUpdateAvailable(() => showUpdateBanner()); // fallback while busy
+const stopChecks = startAppUpdateChecks({
+  currentRelease,
+  endpoint: "/version",
+});
+const stopAuto = startAutoUpdate({ isBusy: () => hasUnsavedDrafts() });
+```
+
+The page reloads at its current URL. Keep an Update now banner for the busy case.
