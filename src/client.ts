@@ -1026,6 +1026,10 @@ let currentRelease: string | undefined;
 let newestRelease: string | undefined;
 let observingServiceWorker = false;
 let applyingUpdate: Promise<void> | undefined;
+// Set by startAppUpdateChecks({ currentRelease }): the release this page runs and
+// a way to ask the server for the newest one.
+let pageRelease: string | undefined;
+let probeRelease: (() => Promise<string | undefined>) | undefined;
 
 const updateSnapshot = (): AppUpdate => ({
   ...(currentRelease === undefined ? {} : { currentRelease }),
@@ -1045,6 +1049,20 @@ export const announceUpdateAvailable = (signal: AppUpdateSignal): void => {
   updateListeners.forEach((listener) => listener(update));
 };
 
+// A new worker isn't always a new app. When the server's newest release is the
+// one this page already runs (the page loaded fresh during a deploy), let the
+// worker take over quietly: no prompt, no reload. Otherwise it's a real update.
+const settleWaitingWorker = async (registration: ServiceWorkerRegistration) => {
+  if (pageRelease !== undefined && probeRelease !== undefined) {
+    const newest = await probeRelease().catch(() => undefined);
+    if (newest === pageRelease) {
+      registration.waiting?.postMessage("SKIP_WAITING");
+      return;
+    }
+  }
+  announceUpdateAvailable({ source: "service-worker" });
+};
+
 const observeServiceWorkerUpdates = (): void => {
   if (
     observingServiceWorker ||
@@ -1055,14 +1073,14 @@ const observeServiceWorkerUpdates = (): void => {
   observingServiceWorker = true;
   void navigator.serviceWorker.ready.then((registration) => {
     if (registration.waiting && navigator.serviceWorker.controller) {
-      announceUpdateAvailable({ source: "service-worker" });
+      void settleWaitingWorker(registration);
     }
     registration.addEventListener("updatefound", () => {
       const next = registration.installing;
       if (!next) return;
       next.addEventListener("statechange", () => {
         if (next.state === "installed" && navigator.serviceWorker.controller) {
-          announceUpdateAvailable({ source: "service-worker" });
+          void settleWaitingWorker(registration);
         }
       });
     });
@@ -1174,26 +1192,33 @@ export const startAppUpdateChecks = (
   let checking = false;
   let reported = false;
   let controller: AbortController | undefined;
+  const fetchRelease = async (signal?: AbortSignal) => {
+    if (!endpoint) return undefined;
+    const response = await window.fetch(endpoint.href, {
+      cache: "no-store",
+      credentials: "same-origin",
+      signal,
+    });
+    if (!response.ok) return undefined;
+    const body: unknown = await response.json();
+    if (!body || typeof body !== "object") return undefined;
+    return "commit" in body && typeof body.commit === "string"
+      ? body.commit
+      : "release" in body && typeof body.release === "string"
+        ? body.release
+        : undefined;
+  };
+  if (endpoint && options.currentRelease) {
+    pageRelease = options.currentRelease;
+    probeRelease = () => fetchRelease();
+  }
   const checkRelease = async () => {
     if (!endpoint || checking || reported || stopped) return;
     checking = true;
     controller = new AbortController();
     const timeout = window.setTimeout(() => controller?.abort(), 10000);
     try {
-      const response = await window.fetch(endpoint.href, {
-        cache: "no-store",
-        credentials: "same-origin",
-        signal: controller.signal,
-      });
-      if (!response.ok) return;
-      const body: unknown = await response.json();
-      if (!body || typeof body !== "object") return;
-      const release =
-        "commit" in body && typeof body.commit === "string"
-          ? body.commit
-          : "release" in body && typeof body.release === "string"
-            ? body.release
-            : undefined;
+      const release = await fetchRelease(controller.signal);
       if (!release || release === options.currentRelease || stopped) return;
       reported = true;
       announceUpdateAvailable({
@@ -1235,10 +1260,126 @@ export const startAppUpdateChecks = (
   check();
   return () => {
     stopped = true;
+    if (probeRelease !== undefined && pageRelease === options.currentRelease) {
+      pageRelease = undefined;
+      probeRelease = undefined;
+    }
     controller?.abort();
     window.clearInterval(interval);
     window.removeEventListener("focus", whenVisible);
     window.removeEventListener("online", whenVisible);
     document.removeEventListener("visibilitychange", whenVisible);
+  };
+};
+
+export type AutoUpdateOptions = {
+  /** Quiet period (no pointer, key, wheel, touch or scroll input) a visible tab
+   *  must reach before updating. Default 15000ms. */
+  idleMs?: number;
+  /** How often to re-check once an update is waiting but the page is busy.
+   *  Default 5000ms. */
+  retryMs?: number;
+  /** App-specific veto, e.g. unsaved drafts. Return true to postpone. */
+  isBusy?: () => boolean;
+  /** Called once, just before the page reloads into the new release. */
+  onApply?: () => void;
+  applyOptions?: ApplyUpdateOptions;
+};
+
+const editableSelector =
+  'input:not([type="button"]):not([type="submit"]):not([type="reset"]):not([type="checkbox"]):not([type="radio"]), textarea, select, [contenteditable=""], [contenteditable="true"]';
+
+/** Built-in "don't reload now" signals: an open dialog/modal, or focus in a
+ *  field where someone may be typing. */
+export const pageLooksBusy = (): boolean => {
+  if (typeof document === "undefined") return false;
+  const doc = document as Partial<Document>;
+  if (
+    typeof doc.querySelector === "function" &&
+    doc.querySelector('dialog[open], [role="dialog"], [aria-modal="true"]')
+  )
+    return true;
+  const active = doc.activeElement as Element | null | undefined;
+  return (
+    typeof active?.matches === "function" && active.matches(editableSelector)
+  );
+};
+
+const interactionEvents = [
+  "pointerdown",
+  "keydown",
+  "wheel",
+  "touchstart",
+  "scroll",
+  "input",
+] as const;
+
+/** Apply app updates without asking, at a moment that cannot lose work: at once
+ *  in a hidden tab, or after `idleMs` without input in a visible one, and never
+ *  while a dialog is open, a field has focus or `isBusy()` returns true. Pairs
+ *  with startAppUpdateChecks() for discovery; a banner from onUpdateAvailable()
+ *  remains useful while the page is busy. Returns a stop function. */
+export const startAutoUpdate = (
+  options: AutoUpdateOptions = {},
+): (() => void) => {
+  if (typeof window === "undefined" || typeof document === "undefined")
+    return () => {};
+  const idleMs = Math.max(0, options.idleMs ?? 15000);
+  const retryMs = Math.max(10, options.retryMs ?? 5000);
+  let pending = false;
+  let stopped = false;
+  let applied = false;
+  let lastInteraction = Date.now();
+  let timer: number | undefined;
+
+  const busy = () => {
+    try {
+      return pageLooksBusy() || options.isBusy?.() === true;
+    } catch {
+      return true; // An app check that fails never forces a reload.
+    }
+  };
+  const schedule = (delay: number) => {
+    if (timer !== undefined) window.clearTimeout(timer);
+    timer = window.setTimeout(evaluate, Math.max(0, delay));
+  };
+  function evaluate() {
+    timer = undefined;
+    if (!pending || stopped || applied) return;
+    const hidden = document.visibilityState === "hidden";
+    const quietFor = Date.now() - lastInteraction;
+    if (!hidden && quietFor < idleMs) return schedule(idleMs - quietFor);
+    if (busy()) return schedule(retryMs);
+    applied = true;
+    options.onApply?.();
+    void applyUpdate(options.applyOptions).catch(() => {
+      applied = false; // Transient failure: try again on the next quiet moment.
+      schedule(retryMs);
+    });
+  }
+  const interacted = () => {
+    lastInteraction = Date.now();
+    if (pending && document.visibilityState !== "hidden") schedule(idleMs);
+  };
+  const visibility = () => {
+    if (pending) schedule(0);
+  };
+  for (const event of interactionEvents)
+    window.addEventListener(event, interacted, {
+      capture: true,
+      passive: true,
+    });
+  document.addEventListener("visibilitychange", visibility);
+  const unsubscribe = onUpdateAvailable(() => {
+    pending = true;
+    schedule(0);
+  });
+  return () => {
+    stopped = true;
+    unsubscribe();
+    if (timer !== undefined) window.clearTimeout(timer);
+    for (const event of interactionEvents)
+      window.removeEventListener(event, interacted, { capture: true });
+    document.removeEventListener("visibilitychange", visibility);
   };
 };

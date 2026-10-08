@@ -1,6 +1,6 @@
 {
   "name": "@absolutejs/pwa",
-  "version": "0.15.0",
+  "version": "0.16.2",
   "description": "Framework-agnostic installability, offline Sync, service workers, and Web Push for AbsoluteJS apps",
   "repository": {
     "type": "git",
@@ -41,7 +41,7 @@
     "prepublishOnly": "bun run check:package"
   },
   "dependencies": {
-    "@absolutejs/devices": "^0.6.0",
+    "@absolutejs/devices": ">=0.6.0 <0.8.0",
     "@absolutejs/sync": "2.29.0",
     "web-push": "^3.6.7",
     "@absolutejs/manifest": "^0.9.0",

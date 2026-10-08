@@ -705,6 +705,100 @@ describe("app update flow", () => {
   });
 });
 
+describe("quiet worker updates", () => {
+  const setup = async (serverRelease: string) => {
+    // A fresh module: update state is latched per page.
+    const client = await import(`./client?quiet=${serverRelease}`);
+    const originals = ["window", "document", "navigator"].map(
+      (key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const,
+    );
+    const serviceWorker = new EventTarget();
+    let skipped = 0;
+    const registration = {
+      addEventListener: () => {},
+      installing: null,
+      update: async () => {},
+      waiting: { postMessage: () => (skipped += 1) },
+    } as unknown as ServiceWorkerRegistration;
+    Object.defineProperty(serviceWorker, "controller", { value: {} });
+    Object.defineProperty(serviceWorker, "ready", {
+      value: Promise.resolve(registration),
+    });
+    Object.defineProperty(serviceWorker, "getRegistration", {
+      value: async () => registration,
+    });
+    const win = Object.assign(new EventTarget(), {
+      location: { href: "https://example.com/", origin: "https://example.com" },
+      fetch: async () =>
+        new Response(JSON.stringify({ release: serverRelease })),
+      setInterval: () => 1,
+      clearInterval: () => {},
+      setTimeout,
+      clearTimeout,
+    });
+    const doc = Object.assign(new EventTarget(), {
+      visibilityState: "visible",
+    });
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: win,
+    });
+    Object.defineProperty(globalThis, "document", {
+      configurable: true,
+      value: doc,
+    });
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: { serviceWorker },
+    });
+    const restore = () => {
+      for (const [key, descriptor] of originals) {
+        if (descriptor === undefined) Reflect.deleteProperty(globalThis, key);
+        else Object.defineProperty(globalThis, key, descriptor);
+      }
+    };
+    return { client, restore, skipped: () => skipped };
+  };
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+  test("a new worker for the release this page already runs takes over quietly", async () => {
+    const { client, restore, skipped } = await setup("r1");
+    try {
+      const updates: AppUpdate[] = [];
+      const stopListening = client.onUpdateAvailable((u: AppUpdate) =>
+        updates.push(u),
+      );
+      const stopChecks = client.startAppUpdateChecks({ currentRelease: "r1" });
+      await settle();
+      expect(updates).toEqual([]);
+      expect(skipped()).toBe(1);
+      stopChecks();
+      stopListening();
+    } finally {
+      restore();
+    }
+  });
+
+  test("a new worker for a newer release is still offered", async () => {
+    const { client, restore, skipped } = await setup("r2");
+    try {
+      const updates: AppUpdate[] = [];
+      const stopListening = client.onUpdateAvailable((u: AppUpdate) =>
+        updates.push(u),
+      );
+      const stopChecks = client.startAppUpdateChecks({ currentRelease: "r1" });
+      await settle();
+      expect(skipped()).toBe(0);
+      expect(updates.at(-1)?.sources).toContain("service-worker");
+      expect(updates.at(-1)?.sources).toContain("release-probe");
+      stopChecks();
+      stopListening();
+    } finally {
+      restore();
+    }
+  });
+});
+
 describe("long-lived tab update checks", () => {
   test("probes releases on reconnect, tolerates offline/invalid responses, latches once and cleans up", async () => {
     const { startAppUpdateChecks } = await import("./client");
@@ -831,4 +925,154 @@ test("a denied update lookup can be retried without duplicate reloads", async ()
       else Reflect.deleteProperty(globalThis, key);
     }
   }
+});
+
+describe("automatic updates at a safe moment", () => {
+  let freshModule = 0;
+  const installPage = () => {
+    const originals = ["window", "document", "navigator"].map(
+      (key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const,
+    );
+    const state = {
+      reloads: 0,
+      dialogOpen: false,
+      focused: null as null | { matches: (selector: string) => boolean },
+    };
+    const win = Object.assign(new EventTarget(), {
+      location: {
+        href: "https://example.com/tasks?task=1",
+        origin: "https://example.com",
+        reload: () => {
+          state.reloads++;
+        },
+      },
+      setTimeout,
+      clearTimeout,
+      setInterval,
+      clearInterval,
+    });
+    const doc = Object.assign(new EventTarget(), {
+      visibilityState: "visible" as "visible" | "hidden",
+      querySelector: () => (state.dialogOpen ? {} : null),
+      get activeElement() {
+        return state.focused;
+      },
+    });
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: win,
+    });
+    Object.defineProperty(globalThis, "document", {
+      configurable: true,
+      value: doc,
+    });
+    // No service worker: applyUpdate falls back to a plain reload.
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {},
+    });
+    const restore = () => {
+      for (const [key, descriptor] of originals) {
+        if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+        else Reflect.deleteProperty(globalThis, key);
+      }
+    };
+    return { win, doc, state, restore };
+  };
+  const load = async () =>
+    (await import(
+      `./client.ts?auto-update-${++freshModule}`
+    )) as typeof import("./client");
+  const announce = (client: typeof import("./client")) =>
+    client.announceUpdateAvailable({
+      source: "release-probe",
+      newestRelease: "b",
+    });
+
+  test("a hidden tab updates as soon as the new release is known", async () => {
+    const page = installPage();
+    const client = await load();
+    page.doc.visibilityState = "hidden";
+    const stop = client.startAutoUpdate({ idleMs: 60_000 });
+    try {
+      await Bun.sleep(5);
+      expect(page.state.reloads).toBe(0);
+      announce(client);
+      await Bun.sleep(20);
+      expect(page.state.reloads).toBe(1);
+    } finally {
+      stop();
+      page.restore();
+    }
+  });
+
+  test("a visible tab waits for a quiet period, and new input restarts it", async () => {
+    const page = installPage();
+    const client = await load();
+    const stop = client.startAutoUpdate({ idleMs: 80 });
+    try {
+      announce(client);
+      await Bun.sleep(50);
+      page.win.dispatchEvent(new Event("keydown"));
+      await Bun.sleep(50);
+      expect(page.state.reloads).toBe(0);
+      await Bun.sleep(80);
+      expect(page.state.reloads).toBe(1);
+    } finally {
+      stop();
+      page.restore();
+    }
+  });
+
+  test("open dialogs, focused fields and the app's own veto postpone the update", async () => {
+    const page = installPage();
+    const client = await load();
+    let unsaved = true;
+    let crashing = false;
+    const stop = client.startAutoUpdate({
+      idleMs: 0,
+      retryMs: 20,
+      isBusy: () => {
+        if (crashing) throw Error("check failed");
+        return unsaved;
+      },
+    });
+    try {
+      page.state.dialogOpen = true;
+      announce(client);
+      await Bun.sleep(40);
+      expect(page.state.reloads).toBe(0);
+      page.state.dialogOpen = false;
+      page.state.focused = { matches: () => true };
+      await Bun.sleep(40);
+      expect(page.state.reloads).toBe(0);
+      page.state.focused = null;
+      await Bun.sleep(40);
+      expect(page.state.reloads).toBe(0); // isBusy() still true
+      unsaved = false;
+      crashing = true;
+      await Bun.sleep(40);
+      expect(page.state.reloads).toBe(0); // a failing check never forces a reload
+      crashing = false;
+      await Bun.sleep(40);
+      expect(page.state.reloads).toBe(1);
+    } finally {
+      stop();
+      page.restore();
+    }
+  });
+
+  test("stopping cancels a pending automatic update", async () => {
+    const page = installPage();
+    const client = await load();
+    const stop = client.startAutoUpdate({ idleMs: 40 });
+    announce(client);
+    stop();
+    try {
+      await Bun.sleep(80);
+      expect(page.state.reloads).toBe(0);
+    } finally {
+      page.restore();
+    }
+  });
 });
