@@ -1,6 +1,6 @@
 {
   "name": "@absolutejs/pwa",
-  "version": "0.16.1",
+  "version": "0.16.2",
   "description": "Framework-agnostic installability, offline Sync, service workers, and Web Push for AbsoluteJS apps",
   "repository": {
     "type": "git",

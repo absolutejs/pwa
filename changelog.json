@@ -5,6 +5,17 @@
 		{
 			"changes": [
 				{
+					"detail": "The `@absolutejs/devices` dependency accepted only 0.6, so apps on `@absolutejs/devices` 0.7, which every current AbsoluteJS mobile build installs, got a second copy just for this package. It now accepts 0.6 and 0.7.",
+					"kind": "fixed",
+					"summary": "Apps using @absolutejs/devices 0.7 no longer install a second copy"
+				}
+			],
+			"date": "2026-10-08",
+			"version": "0.16.2"
+		},
+		{
+			"changes": [
+				{
 					"kind": "fixed",
 					"summary": "A new service worker no longer counts as an app update when the server's newest release is the one the page already runs (a page loaded fresh during a deploy). With startAppUpdateChecks({ currentRelease }) running, the waiting worker takes over quietly: no onUpdateAvailable prompt and no auto-update reload. A genuinely newer release is still announced.",
 					"symbols": [
