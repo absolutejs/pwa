@@ -705,6 +705,100 @@ describe("app update flow", () => {
   });
 });
 
+describe("quiet worker updates", () => {
+  const setup = async (serverRelease: string) => {
+    // A fresh module: update state is latched per page.
+    const client = await import(`./client?quiet=${serverRelease}`);
+    const originals = ["window", "document", "navigator"].map(
+      (key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const,
+    );
+    const serviceWorker = new EventTarget();
+    let skipped = 0;
+    const registration = {
+      addEventListener: () => {},
+      installing: null,
+      update: async () => {},
+      waiting: { postMessage: () => (skipped += 1) },
+    } as unknown as ServiceWorkerRegistration;
+    Object.defineProperty(serviceWorker, "controller", { value: {} });
+    Object.defineProperty(serviceWorker, "ready", {
+      value: Promise.resolve(registration),
+    });
+    Object.defineProperty(serviceWorker, "getRegistration", {
+      value: async () => registration,
+    });
+    const win = Object.assign(new EventTarget(), {
+      location: { href: "https://example.com/", origin: "https://example.com" },
+      fetch: async () =>
+        new Response(JSON.stringify({ release: serverRelease })),
+      setInterval: () => 1,
+      clearInterval: () => {},
+      setTimeout,
+      clearTimeout,
+    });
+    const doc = Object.assign(new EventTarget(), {
+      visibilityState: "visible",
+    });
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: win,
+    });
+    Object.defineProperty(globalThis, "document", {
+      configurable: true,
+      value: doc,
+    });
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: { serviceWorker },
+    });
+    const restore = () => {
+      for (const [key, descriptor] of originals) {
+        if (descriptor === undefined) Reflect.deleteProperty(globalThis, key);
+        else Object.defineProperty(globalThis, key, descriptor);
+      }
+    };
+    return { client, restore, skipped: () => skipped };
+  };
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+  test("a new worker for the release this page already runs takes over quietly", async () => {
+    const { client, restore, skipped } = await setup("r1");
+    try {
+      const updates: AppUpdate[] = [];
+      const stopListening = client.onUpdateAvailable((u: AppUpdate) =>
+        updates.push(u),
+      );
+      const stopChecks = client.startAppUpdateChecks({ currentRelease: "r1" });
+      await settle();
+      expect(updates).toEqual([]);
+      expect(skipped()).toBe(1);
+      stopChecks();
+      stopListening();
+    } finally {
+      restore();
+    }
+  });
+
+  test("a new worker for a newer release is still offered", async () => {
+    const { client, restore, skipped } = await setup("r2");
+    try {
+      const updates: AppUpdate[] = [];
+      const stopListening = client.onUpdateAvailable((u: AppUpdate) =>
+        updates.push(u),
+      );
+      const stopChecks = client.startAppUpdateChecks({ currentRelease: "r1" });
+      await settle();
+      expect(skipped()).toBe(0);
+      expect(updates.at(-1)?.sources).toContain("service-worker");
+      expect(updates.at(-1)?.sources).toContain("release-probe");
+      stopChecks();
+      stopListening();
+    } finally {
+      restore();
+    }
+  });
+});
+
 describe("long-lived tab update checks", () => {
   test("probes releases on reconnect, tolerates offline/invalid responses, latches once and cleans up", async () => {
     const { startAppUpdateChecks } = await import("./client");

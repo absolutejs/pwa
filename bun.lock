@@ -5,7 +5,7 @@
     "": {
       "name": "@absolutejs/pwa",
       "dependencies": {
-        "@absolutejs/devices": "^0.6.0",
+        "@absolutejs/devices": ">=0.6.0 <0.8.0",
         "@absolutejs/manifest": "^0.9.0",
         "@absolutejs/sync": "2.29.0",
         "@sinclair/typebox": "^0.34.0",
@@ -24,7 +24,7 @@
   "packages": {
     "@absolutejs/changelog": ["@absolutejs/changelog@0.6.0", "", { "dependencies": { "typescript": "^5.8.3" }, "bin": { "absolute-changelog": "dist/cli.js" } }, "sha512-bsCCN7PVubSQ07dcaZgoE8M46QDOYMz9+Idc//bmxZd2KRK2wG7W5jqAIvjotD7mZD/6pVfGyNCxE+VNoYguvA=="],
 
-    "@absolutejs/devices": ["@absolutejs/devices@0.6.0", "", {}, "sha512-juNvYnuY/TCHPZJdgdTTuC8LjlTLoB2q2ueVgxkxeZjAt8rNbHLxSLscFAmD8ZPIG5YR8UGiSHDwj/WhXFMobQ=="],
+    "@absolutejs/devices": ["@absolutejs/devices@0.7.0", "", {}, "sha512-yRMk/Fvyiv/n7btoDmS2YNos3uZ4URxpV6zsJ71bZaFVCR/rqwma1rhonluj15yBMWUhhwWF3jb2avfEZynzWw=="],
 
     "@absolutejs/handoff": ["@absolutejs/handoff@0.1.0", "", { "dependencies": { "@absolutejs/manifest": "0.7.2", "@sinclair/typebox": "0.34.52" } }, "sha512-P9Wr2oyYBcj7mriCV4h9zRlLGijee/7DW8USVkl/m4ovql7zpITy547jy6j8+HC5v5Ocs+TVcMYmrROEEBupNg=="],
 
