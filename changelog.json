@@ -5,6 +5,17 @@
 		{
 			"changes": [
 				{
+					"detail": "pwa pinned `@absolutejs/sync` to exactly 2.29.0, so any app on another sync version installed a second copy. It now accepts any sync from 2.29.0 below 4, including sync 3.0.0 (built against Elysia 2.0.0-rc.0, with no API change).",
+					"kind": "changed",
+					"summary": "Accepts @absolutejs/sync 2.29 through 3.x instead of exactly 2.29.0"
+				}
+			],
+			"date": "2026-10-22",
+			"version": "0.16.3"
+		},
+		{
+			"changes": [
+				{
 					"detail": "The `@absolutejs/devices` dependency accepted only 0.6, so apps on `@absolutejs/devices` 0.7, which every current AbsoluteJS mobile build installs, got a second copy just for this package. It now accepts 0.6 and 0.7.",
 					"kind": "fixed",
 					"summary": "Apps using @absolutejs/devices 0.7 no longer install a second copy"
