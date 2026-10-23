@@ -3,6 +3,30 @@
 	"name": "@absolutejs/pwa",
 	"releases": [
 		{
+			"version": "0.17.0",
+			"date": "2026-10-23",
+			"changes": [
+				{
+					"kind": "added",
+					"summary": "Recover same-origin asset and lazy-navigation failures through an explicit update or retry action, preserving the current page and intended destination without automatic reloads.",
+					"symbols": [
+						"startAppUpdateChecks",
+						"reportAssetLoadFailure",
+						"onAssetLoadFailure",
+						"clearAssetLoadFailure",
+						"applyUpdate"
+					]
+				},
+				{
+					"kind": "changed",
+					"summary": "Allow an explicit update action to continue to a validated same-origin navigation destination, and refuse reloads while offline.",
+					"symbols": [
+						"ApplyUpdateOptions"
+					]
+				}
+			]
+		},
+		{
 			"changes": [
 				{
 					"detail": "pwa pinned `@absolutejs/sync` to exactly 2.29.0, so any app on another sync version installed a second copy. It now accepts any sync from 2.29.0 below 4, including sync 3.0.0 (built against Elysia 2.0.0-rc.0, with no API change).",

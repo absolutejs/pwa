@@ -1,3 +1,10 @@
+import { installAssetLoadRecovery } from "./assetRecovery";
+export {
+  reportAssetLoadFailure,
+  onAssetLoadFailure,
+  clearAssetLoadFailure,
+  type AssetLoadFailure,
+} from "./assetRecovery";
 // @absolutejs/pwa/client — browser glue for service-worker registration and
 // Web Push subscription. Decoupled from your API: subscribe/unsubscribe RETURN
 // the subscription/endpoint and you POST it to your own server routes. Every
@@ -1015,6 +1022,8 @@ export type AppUpdateSignal = {
 };
 
 export type ApplyUpdateOptions = {
+  /** Same-origin failed navigation destination. Used only after an explicit user action. */
+  targetUrl?: string;
   /** Maximum wait for a waiting service worker to take control before a hard
    *  reload. Default 5000ms. */
   activationTimeoutMs?: number;
@@ -1120,14 +1129,30 @@ export const applyUpdate = (
   if (applyingUpdate !== undefined) return applyingUpdate;
   applyingUpdate = (async () => {
     if (typeof window === "undefined") return;
+    if (typeof navigator !== "undefined" && navigator.onLine === false)
+      throw new Error("Reconnect to the internet before updating.");
+    const target =
+      options.targetUrl === undefined
+        ? undefined
+        : new URL(options.targetUrl, window.location.href);
+    if (
+      target &&
+      (target.origin !== window.location.origin ||
+        !/^https?:$/.test(target.protocol) ||
+        target.username ||
+        target.password)
+    )
+      throw new TypeError("Update destination must be same-origin");
+    const navigate = () =>
+      target ? window.location.replace(target.href) : window.location.reload();
     if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) {
-      window.location.reload();
+      navigate();
       return;
     }
 
     const registration = await navigator.serviceWorker.getRegistration();
     if (!registration?.waiting) {
-      window.location.reload();
+      navigate();
       return;
     }
 
@@ -1136,7 +1161,7 @@ export const applyUpdate = (
       const reload = () => {
         if (reloaded) return;
         reloaded = true;
-        window.location.reload();
+        navigate();
         resolve();
       };
       navigator.serviceWorker.addEventListener("controllerchange", reload, {
@@ -1247,6 +1272,7 @@ export const startAppUpdateChecks = (
         });
     }
   };
+  const stopAssetRecovery = installAssetLoadRecovery(check);
   const whenVisible = () => {
     if (document.visibilityState === "visible") check();
   };
@@ -1260,6 +1286,7 @@ export const startAppUpdateChecks = (
   check();
   return () => {
     stopped = true;
+    stopAssetRecovery();
     if (probeRelease !== undefined && pageRelease === options.currentRelease) {
       pageRelease = undefined;
       probeRelease = undefined;

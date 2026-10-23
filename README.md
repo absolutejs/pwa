@@ -335,3 +335,9 @@ const stopAuto = startAutoUpdate({ isBusy: () => hasUnsavedDrafts() });
 ```
 
 The page reloads at its current URL. Keep an Update now banner for the busy case.
+
+### Recovering asset loads without losing the current page
+
+`startAppUpdateChecks()` also monitors same-origin script, stylesheet, and module-preload failures. It never reloads automatically. Subscribe to `onAssetLoadFailure` alongside `onUpdateAvailable` to show one retry/update action. A failure captured before the UI subscribes is replayed to that subscriber. The original error remains available to error tracking.
+
+Feed handled router errors into `reportAssetLoadFailure(error, destination)`. It returns `false` for unrelated errors or external destinations. After a successful navigation, call `clearAssetLoadFailure()`. On the user's explicit retry, call `applyUpdate({ targetUrl: failure?.targetUrl })`: this activates a waiting worker if necessary and replaces the failed destination once. Offline or failed activation attempts remain retryable; no timer reloads the page without that explicit action.
