@@ -3,8 +3,20 @@
 	"name": "@absolutejs/pwa",
 	"releases": [
 		{
-			"version": "0.17.0",
-			"date": "2026-10-23",
+			"changes": [
+				{
+					"kind": "fixed",
+					"summary": "Preserve the intended recovery route when a handled module import failure also reaches the global rejection listener.",
+					"symbols": [
+						"reportAssetLoadFailure",
+						"startAppUpdateChecks"
+					]
+				}
+			],
+			"date": "2026-11-16",
+			"version": "0.17.1"
+		},
+		{
 			"changes": [
 				{
 					"kind": "added",
@@ -24,7 +36,9 @@
 						"ApplyUpdateOptions"
 					]
 				}
-			]
+			],
+			"date": "2026-10-23",
+			"version": "0.17.0"
 		},
 		{
 			"changes": [

@@ -152,3 +152,26 @@ test("explicit update uses the intended route once and rejects external URLs", a
   ]);
   expect(navigation).toEqual(["https://app.test/partners"]);
 });
+
+test("global import rejection cannot erase a router's known recovery destination", () => {
+  const failures: AssetLoadFailure[] = [];
+  const off = onAssetLoadFailure((failure) => {
+    if (failure) failures.push(failure);
+  });
+  const stop = installAssetLoadRecovery(() => {});
+  const error = new TypeError("Importing a module script failed.");
+  reportAssetLoadFailure(error, "/partners?view=board");
+  const event = new Event("unhandledrejection");
+  Object.defineProperty(event, "reason", { value: error });
+  browser.dispatchEvent(event);
+  expect(failures.at(-1)?.targetUrl).toBe(
+    "https://app.test/partners?view=board",
+  );
+  reportAssetLoadFailure(error, "/meetings");
+  expect(failures.at(-1)?.targetUrl).toBe("https://app.test/meetings");
+  clearAssetLoadFailure();
+  browser.dispatchEvent(event);
+  expect(failures.at(-1)?.targetUrl).toBeUndefined();
+  stop();
+  off();
+});

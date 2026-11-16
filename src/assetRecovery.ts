@@ -28,6 +28,15 @@ const sameOrigin = (value: string): string | undefined => {
 const emit = (failure: AssetLoadFailure) => {
   // A late speculative preload failure must not replace the user's intended route.
   if (latest?.kind === "navigation" && failure.kind === "resource") return;
+  // Vue/router errors can also surface as an unhandled rejection. That global
+  // event has no destination and must not erase the route captured by onError.
+  if (
+    latest?.kind === "navigation" &&
+    latest.targetUrl &&
+    failure.kind === "navigation" &&
+    !failure.targetUrl
+  )
+    failure = { ...failure, targetUrl: latest.targetUrl };
   latest = failure;
   for (const listener of listeners) listener(failure);
 };
